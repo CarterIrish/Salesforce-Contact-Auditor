@@ -27,24 +27,40 @@ Out of scope: web UI, Salesforce write-back, job queue, database. None of them e
 ```
 salesforce-contact-auditor/
 ├── src/
-│   ├── search.ts      # Phase 1 entry.  node src/search.js data/input/contacts.xlsx
-│   ├── enrich.ts      # Phase 2 entry.  node src/enrich.js data/output/verified.xlsx
-│   ├── zoominfo.ts    # getToken(), contactSearch(), contactEnrich()
+│   ├── cli.ts         # The only entry point.  npm run dev -- search data/input/contacts.xlsx
+│   ├── search.ts      # Phase 1 workflow — runSearch(inputFile), dispatched by cli.ts
+│   ├── enrich.ts      # Phase 2 workflow — later. Until built, the subcommand throws.
+│   ├── auth.ts        # getToken() — the token seam. See §6 step 3.
+│   ├── zoominfo.ts    # contactSearch(), contactEnrich()
 │   ├── excel.ts       # readRows(), writeResults()
 │   └── cache.ts       # ~10 lines. Keyed JSON file. See §5.
-├── data/              # GITIGNORED — real people's PII. Add to .gitignore in the first commit.
+├── dist/              # tsc output, gitignored. npm start runs dist/cli.js.
+├── data/              # GITIGNORED — real people's PII. Verified: test.xlsx is ignored.
 │   ├── input/
 │   ├── output/
 │   └── cache/
-├── .env               # ZOOMINFO_USERNAME, ZOOMINFO_PASSWORD
-├── .env.example       # Committed. No real values.
+├── .env               # ZOOMINFO_BEARER_TOKEN for now (hand-minted in the dev portal, ~60 min TTL);
+│                      # becomes ZOOMINFO_USERNAME / ZOOMINFO_PASSWORD when auth.ts goes programmatic
+├── .env.example       # Committed. No real values. ← not created yet
 └── README.md          # The handoff artifact — see §7.
 ```
 
-**Dependencies:** `exceljs`, `dotenv`. Native `fetch`. That's it.
+**Runtime dependencies:** `exceljs` (not yet installed), `dotenv`, `chalk`. Native `fetch`.
+**Toolchain:** TypeScript strict; `tsx` runs the dev loop (`npm run dev -- <command> <file>`), `tsc`
+builds to `dist/` (`npm start`). CommonJS package (ESM `import` syntax, compiled to `require`) with
+`nodenext` module resolution — required because chalk 5 is ESM-only and Node ≥ 22 can `require()` it
+natively; `node16` resolution rejects that.
 
-No test framework, no CLI framework, no validation library, no rate-limit library. Rate limiting is
-four lines: send 25, wait a second, repeat. At 2,880 rows the run takes ~2 minutes.
+No test framework, no CLI framework (arg parsing is `parseArgs` from `node:util`), no validation
+library, no rate-limit library. Rate limiting is four lines: send 25, wait a second, repeat. At
+2,880 rows the run takes ~2 minutes.
+
+**One entry point, not two.** An earlier revision of this doc specced separate entry files per phase
+so enrich could never fire by accident. The design moved to a single `cli.ts` routing `search` /
+`enrich` subcommands — the guard survives because `enrich` is an explicit command that throws until
+phase 2 is deliberately built. cli.ts validates user input at the boundary (file must exist, command
+must be known) and owns the single top-level `.catch` that prints errors and sets the exit code;
+workflow modules trust their inputs and communicate failure by throwing.
 
 ---
 
@@ -166,17 +182,34 @@ Keeping them separate is what stops the tool from confidently reporting good con
 
 ## 6. Build order
 
+> **Status (2026-07-20):** steps 0–2 done and committed. `cli.ts` is finished and verified:
+> parse (`parseArgs`) → help/no-args early exit (prints USAGE, exit 0) → validate → dispatch,
+> failures thrown and funneled to the one top-level `.catch` (message + USAGE, exit 1). `search`
+> hands off to a `runSearch()` stub in `search.ts`; `enrich` throws on purpose. Both the tsx dev
+> loop and the compiled `dist/` build are verified working. **Pick up at step 3.**
+
 0. ~~Verify the search response returns the _present_ company.~~ **Done** — see §3.
-1. `.gitignore` `data/` and `.env` — **first commit, before any real sheet lands in the repo.**
-2. `excel.ts` — read the real sheet, print the rows. Confirm every row has a usable company value.
-   _(A wall of rows with no company means `NOT_FOUND` will be meaningless — find that out now, not
-   at row 400.)_
-3. `zoominfo.ts` — programmatic auth (replacing the manual bearer token), then `contactSearch()`.
-4. Status logic + `cache.ts`. Run on **10 rows**. Check every result by hand.
-5. Then 100 rows — this is where you eyeball for false `INACTIVE`s and decide whether §4's pass-2
+1. ~~`.gitignore` `data/` and `.env` — first commit, before any real sheet lands in the repo.~~
+   **Done.** `data/input/test.xlsx` confirmed ignored.
+2. ~~`cli.ts` — subcommand router, error net, toolchain (tsx dev loop / tsc build).~~ **Done.**
+3. `auth.ts` — `getToken()`, the token seam. For now the body is trivial: read
+   `ZOOMINFO_BEARER_TOKEN` from `.env` (minted by hand in the ZoomInfo dev portal; expires ~60 min,
+   so a mid-session 401 means re-mint, not a bug) and throw a clear error if it's missing. Later,
+   programmatic auth (username/password → JWT, cached ~55 min) replaces the function _body only_ —
+   `zoominfo.ts` calls `getToken()` and never learns where tokens come from. While here: create and
+   commit `.env.example` with placeholder keys.
+4. `excel.ts` — `npm install exceljs`, read the real sheet, print the rows. Confirm every row has a
+   usable company value. _(A wall of rows with no company means `NOT_FOUND` will be meaningless —
+   find that out now, not at row 400.)_ No pre-flight existence check here — cli.ts already gated
+   the path; excel.ts's job is making the *open* failure readable (locked-by-Excel, vanished file)
+   by rethrowing with the path and a hint.
+5. `zoominfo.ts` — `contactSearch()` per §3, token via `getToken()`. First milestone: one hardcoded
+   contact, raw response printed, compared against §3's verified sample.
+6. Status logic + `cache.ts`. Run on **10 rows**. Check every result by hand.
+7. Then 100 rows — this is where you eyeball for false `INACTIVE`s and decide whether §4's pass-2
    company-ID compare is needed. Then all 2,880.
-6. Write the output sheet + summary line (`X active, Y inactive, Z not found`).
-7. Trim to `ACTIVE`, and stop. Phase 1 is done.
+8. Write the output sheet + summary line (`X active, Y inactive, Z not found`).
+9. Trim to `ACTIVE`, and stop. Phase 1 is done.
 
 **Phase 2, later:** `enrich.ts` reads `verified.xlsx`, enriches by `personId`, writes title / email /
 phone.
