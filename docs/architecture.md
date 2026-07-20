@@ -39,8 +39,8 @@ salesforce-contact-auditor/
 │   ├── input/
 │   ├── output/
 │   └── cache/
-├── .env               # ZOOMINFO_BEARER_TOKEN for now (hand-minted in the dev portal, ~60 min TTL);
-│                      # becomes ZOOMINFO_USERNAME / ZOOMINFO_PASSWORD when auth.ts goes programmatic
+├── .env               # CLIENT_ID / CLIENT_SECRET — Client Credentials Flow, exchanged for a
+│                      # short-lived bearer token by auth.ts and cached in memory until near expiry
 ├── .env.example       # Committed. No real values. ← not created yet
 └── README.md          # The handoff artifact — see §7.
 ```
@@ -186,22 +186,24 @@ Keeping them separate is what stops the tool from confidently reporting good con
 > parse (`parseArgs`) → help/no-args early exit (prints USAGE, exit 0) → validate → dispatch,
 > failures thrown and funneled to the one top-level `.catch` (message + USAGE, exit 1). `search`
 > hands off to a `runSearch()` stub in `search.ts`; `enrich` throws on purpose. Both the tsx dev
-> loop and the compiled `dist/` build are verified working. **Pick up at step 3.**
+> loop and the compiled `dist/` build are verified working. Step 3 (`auth.ts`) is implemented but
+> not yet smoke-tested against the live token endpoint. **Pick up at step 4**, and confirm step 3
+> works for real along the way.
 
 0. ~~Verify the search response returns the _present_ company.~~ **Done** — see §3.
 1. ~~`.gitignore` `data/` and `.env` — first commit, before any real sheet lands in the repo.~~
    **Done.** `data/input/test.xlsx` confirmed ignored.
 2. ~~`cli.ts` — subcommand router, error net, toolchain (tsx dev loop / tsc build).~~ **Done.**
-3. `auth.ts` — `getToken()`, the token seam. For now the body is trivial: read
-   `ZOOMINFO_BEARER_TOKEN` from `.env` (minted by hand in the ZoomInfo dev portal; expires ~60 min,
-   so a mid-session 401 means re-mint, not a bug) and throw a clear error if it's missing. Later,
-   programmatic auth (username/password → JWT, cached ~55 min) replaces the function _body only_ —
-   `zoominfo.ts` calls `getToken()` and never learns where tokens come from. While here: create and
-   commit `.env.example` with placeholder keys.
+3. ~~`auth.ts` — `getBearerToken()`, the token seam.~~ **Done.** Implements ZoomInfo's Client
+   Credentials Flow: `CLIENT_ID` / `CLIENT_SECRET` from `.env`, exchanged via HTTP Basic auth for a
+   bearer token (`POST /gtm/oauth/v1/token`, `grant_type=client_credentials`). The token is cached
+   in memory and re-minted automatically once it's within 60s of `expires_in` — `zoominfo.ts` just
+   calls `getBearerToken()` and never learns where tokens come from. **Still TODO:** create and
+   commit `.env.example` with placeholder keys; do a live smoke test against the token endpoint.
 4. `excel.ts` — `npm install exceljs`, read the real sheet, print the rows. Confirm every row has a
    usable company value. _(A wall of rows with no company means `NOT_FOUND` will be meaningless —
    find that out now, not at row 400.)_ No pre-flight existence check here — cli.ts already gated
-   the path; excel.ts's job is making the *open* failure readable (locked-by-Excel, vanished file)
+   the path; excel.ts's job is making the _open_ failure readable (locked-by-Excel, vanished file)
    by rethrowing with the path and a hint.
 5. `zoominfo.ts` — `contactSearch()` per §3, token via `getToken()`. First milestone: one hardcoded
    contact, raw response printed, compared against §3's verified sample.
