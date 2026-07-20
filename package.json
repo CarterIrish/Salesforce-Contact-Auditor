@@ -13,17 +13,18 @@
   "license": "MIT",
   "author": "Carter Irish",
   "type": "commonjs",
-  "main": "src/index.ts",
+  "main": "src/cli.ts",
   "directories": {
     "doc": "docs"
   },
   "scripts": {
-    "dev": "tsx src/index.ts",
+    "dev": "tsx src/cli.ts",
     "build": "tsc",
-    "start": "node dist/index.js",
+    "start": "node dist/cli.js",
     "test": "echo \\\"All tests completed\\\""
   },
   "dependencies": {
+    "chalk": "^5.6.2",
     "dotenv": "^17.4.2"
   },
   "devDependencies": {
