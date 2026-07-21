@@ -7,7 +7,6 @@ import { getBearerToken } from './auth';
 export const runSearch = async (inputFile: string): Promise<void> => {
   const contacts = await readContacts(inputFile);
   console.log(`Read ${contacts.length} contacts from ${inputFile}`);
-  console.log(contacts.map(c => `${c.firstName} ${c.lastname} @ ${c.company} <${c.email}>`).join('\n'));
 
   const chunksize = 25;
   const chunks: ContactRow[][] = [];
@@ -40,7 +39,6 @@ export const runSearch = async (inputFile: string): Promise<void> => {
   console.log(`Summary: ${activeCount} active, ${inactiveCount} inactive, ${notFoundCount} not found, ${errorCount} errors`);
 
   // TODO: excel.writeResults(inputFile, results) — writeResults() doesn't exist yet, see excel.ts
-  // TODO: print the summary line (X active, Y inactive, Z not found) per §6 step 8
 };
 
 export interface SearchResult {
@@ -52,6 +50,13 @@ export interface SearchResult {
   zi_title?: string;
   notes?: string;
 }
+
+  const normalizeCompanyName = (name: string) => 
+    name.toLocaleLowerCase()
+      .replace(/[.,]/g,'')
+      .replace(/\b(inc|incorporated|corp|corporation|llc|ltd|co|company)\b/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
 
 const processContact = async (contact: ContactRow): Promise<SearchResult> => {
   try {
@@ -71,8 +76,6 @@ const processContact = async (contact: ContactRow): Promise<SearchResult> => {
     if (response.meta.totalResults === 0) {
       return { rowNumber: contact.rowNumber, status: 'NOT_FOUND' };
     }
-
-    let normalizeCompanyName = (name: string) => name.toLocaleLowerCase().trim();
 
     const contactMatch = response.data[0]; 
     const notes = response.meta.totalResults > 1 ? `${response.meta.totalResults} matches found, using the most relevant one.` : undefined;
