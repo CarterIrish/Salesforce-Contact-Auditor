@@ -142,7 +142,14 @@ one assumption that could have silently invalidated the design. It holds.
 | `meta.totalResults == 0`       | `NOT_FOUND` — no record of this person at this company, ever              |
 | `company` **==** input company | `ACTIVE`                                                                  |
 | `company` **!=** input company | `INACTIVE` — matched on past employment; they've moved on                 |
-| `totalResults > 1`             | Take the highest `contactAccuracyScore`; flag in `notes` for human review |
+| `totalResults > 1`             | Take `data[0]` (default sort, `-relevance`); flag in `notes` for human review |
+
+> **Not sorting by `contactAccuracyScore`** (decided 2026-07-21): the score measures ZoomInfo's
+> confidence in a single profile's own data quality (employment + email currency), not whether that
+> profile is the person actually being searched for — it can't tell two different same-named people
+> at the same company apart any better than relevance can. Relying on the API's default `-relevance`
+> sort and flagging every multi-match row in `notes` is honest about the ambiguity rather than
+> pretending accuracy resolves it.
 
 ### Search field fallback (found live, 2026-07-20)
 
@@ -182,8 +189,7 @@ Existing columns (A–U) untouched, per the input schema note above. New columns
 | `zi_company`    | X   | `company.name`         | Lets a human sanity-check every `INACTIVE`                                                   |
 | `zi_company_id` | Y   | `company.id`           | Powers the exact company compare — see §4                                                    |
 | `zi_title`      | Z   | `jobTitle`             | Free in search. Part of phase 2, already paid for.                                           |
-| `accuracy`      | AA  | `contactAccuracyScore` | Confidence signal                                                                            |
-| `notes`         | AB  | derived                | Multiple matches, low accuracy, etc.                                                         |
+| `notes`         | AA  | derived                | Multiple matches, or the error message when `status` is `ERROR`.                             |
 
 Then: filter to `status = ACTIVE`, save as `verified.xlsx` — that's phase 2's input.
 
