@@ -26,6 +26,19 @@ export const runSearch = async (inputFile: string): Promise<void> => {
     await new Promise(resolve => setTimeout(resolve, 1000)); // 1s delay between chunks to avoid rate limits
   }
 
+  let errorCount = 0;
+  let activeCount = 0;
+  let inactiveCount = 0;
+  let notFoundCount = 0;
+  for (const result of allResults) {
+    if (result.status === 'ERROR') errorCount++;
+    else if (result.status === 'ACTIVE') activeCount++;
+    else if (result.status === 'INACTIVE') inactiveCount++;
+    else if (result.status === 'NOT_FOUND') notFoundCount++;
+  }
+
+  console.log(`Summary: ${activeCount} active, ${inactiveCount} inactive, ${notFoundCount} not found, ${errorCount} errors`);
+
   // TODO: excel.writeResults(inputFile, results) — writeResults() doesn't exist yet, see excel.ts
   // TODO: print the summary line (X active, Y inactive, Z not found) per §6 step 8
 };
