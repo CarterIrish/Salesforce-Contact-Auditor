@@ -41,11 +41,11 @@ salesforce-contact-auditor/
 │   └── cache/
 ├── .env               # CLIENT_ID / CLIENT_SECRET — Client Credentials Flow, exchanged for a
 │                      # short-lived bearer token by auth.ts and cached in memory until near expiry
-├── .env.example       # Committed. No real values. ← not created yet
+├── .env.example       # Committed. No real values.
 └── README.md          # The handoff artifact — see §7.
 ```
 
-**Runtime dependencies:** `exceljs` (not yet installed), `dotenv`, `chalk`. Native `fetch`.
+**Runtime dependencies:** `exceljs`, `dotenv`, `chalk`. Native `fetch`.
 **Toolchain:** TypeScript strict; `tsx` runs the dev loop (`npm run dev -- <command> <file>`), `tsc`
 builds to `dist/` (`npm start`). CommonJS package (ESM `import` syntax, compiled to `require`) with
 `nodenext` module resolution — required because chalk 5 is ESM-only and Node ≥ 22 can `require()` it
@@ -65,6 +65,30 @@ workflow modules trust their inputs and communicate failure by throwing.
 ---
 
 ## 3. Phase 1: the status check
+
+### Input schema (confirmed against the real export)
+
+The real export (`data/input/ContactExport.xlsx`) is a multi-tab workbook, not a single sheet:
+per-person contact tabs (`Carter`, `Zoe`, `Kylie`), plus `Account List` and `Summary` (unused).
+`readExcelSheet()` currently hardcodes the `'Carter'` tab for development; expand to the others
+later (CLI positional arg, or just hardcode per run — not yet decided).
+
+Column layout on a contact tab, confirmed live (`B`, `E`, `K` are hidden in Excel — invisible when
+reading the header row by eye, but present and readable via ExcelJS same as any other column):
+
+| Col | Header                  | Col | Header                           | Col | Header             |
+| --- | ----------------------- | --- | -------------------------------- | --- | ------------------ |
+| A   | Account Last Update     | H   | Account ID                       | O   | Phone              |
+| B   | Contact ID _(hidden)_   | I   | Account Name                     | P   | Mobile             |
+| C   | First Name              | J   | Account Owner                    | Q   | Email              |
+| D   | Last Name               | K   | Account: Created Date _(hidden)_ | R   | Last Modified By   |
+| E   | Contact Name _(hidden)_ | L   | Contact Status                   | S   | Last Modified Date |
+| F   | Created Date            | M   | Title                            | T   | Email Opt Out      |
+| G   | Created By              | N   | Department                       | U   | NOTES              |
+
+`V` through `AC` are confirmed empty — that's where this tool writes. **Existing columns (A–U) are
+never modified**, including `L` (`Contact Status`) — that's a CRM-managed field, not this tool's to
+overwrite. See Output columns below.
 
 **Endpoint:** `POST https://api.zoominfo.com/gtm/data/v1/contacts/search` (JSON:API —
 `content-type: application/vnd.api+json`). One contact per request; **no batching**. 2,880 rows =
@@ -120,19 +144,46 @@ one assumption that could have silently invalidated the design. It holds.
 | `company` **!=** input company | `INACTIVE` — matched on past employment; they've moved on                 |
 | `totalResults > 1`             | Take the highest `contactAccuracyScore`; flag in `notes` for human review |
 
+### Search field fallback (found live, 2026-07-20)
+
+A single `firstName` + `lastName` + `companyName` search misses real contacts, because Salesforce
+and ZoomInfo each carry an independent, sometimes-stale record of the same person — no one field is
+reliably correct across every contact:
+
+- One contact returned no hit on name alone, name + company, name + phone, or name + email — but hit
+  immediately on email alone or phone alone. Cause: the Salesforce `First Name` is a nickname
+  ("Cc"); ZoomInfo's record uses a different (likely formal) first name, so every name-based
+  combination failed.
+- A second contact hit cleanly on name + company but returned nothing once `email` was added to the
+  same request. Cause: likely a stale Salesforce email — exactly the population this tool cares about
+  most (people who've moved on).
+
+Together these rule out "throw more fields into one request." ZoomInfo's search behaves like an
+**AND** across whatever fields are provided, not an OR — combining fields narrows the match rather
+than broadening it, so one wrong/stale field bundled in with correct ones can sink an otherwise-good
+match.
+
+**Design: sequential fallback, not a combined request.** Try `firstName` + `lastName` +
+`companyName` first (cheapest, correct for the common case). If `totalResults === 0`, retry with
+`email` alone. Only mark `NOT_FOUND` once every fallback with data available has come back empty.
+`contactSearch()` needs to accept partial criteria (not a fixed argument list) so `search.ts` can
+call it multiple times with different subsets — each attempt is its own request, not a combined one.
+Phone is a candidate third fallback (it hit for the nickname case above); hold off building it until
+email-only has been tried against the real run and judged insufficient.
+
 ### Output columns
 
-Original sheet columns, plus:
+Existing columns (A–U) untouched, per the input schema note above. New columns append starting at `V`:
 
-| Column          | Source                 | Notes                                                                                        |
-| --------------- | ---------------------- | -------------------------------------------------------------------------------------------- |
-| `status`        | derived                | `ACTIVE` / `INACTIVE` / `NOT_FOUND` / `ERROR`                                                |
-| `personId`      | `data[0].id`           | **Phase 2's key.** Write as **text** — `"14062844524"` as a number renders as `1.40628E+10`. |
-| `zi_company`    | `company.name`         | Lets a human sanity-check every `INACTIVE`                                                   |
-| `zi_company_id` | `company.id`           | Powers the exact company compare — see §4                                                    |
-| `zi_title`      | `jobTitle`             | Free in search. Part of phase 2, already paid for.                                           |
-| `accuracy`      | `contactAccuracyScore` | Confidence signal                                                                            |
-| `notes`         | derived                | Multiple matches, low accuracy, etc.                                                         |
+| Column          | Col | Source                 | Notes                                                                                        |
+| --------------- | --- | ---------------------- | -------------------------------------------------------------------------------------------- |
+| `status`        | V   | derived                | `ACTIVE` / `INACTIVE` / `NOT_FOUND` / `ERROR`                                                |
+| `personId`      | W   | `data[0].id`           | **Phase 2's key.** Write as **text** — `"14062844524"` as a number renders as `1.40628E+10`. |
+| `zi_company`    | X   | `company.name`         | Lets a human sanity-check every `INACTIVE`                                                   |
+| `zi_company_id` | Y   | `company.id`           | Powers the exact company compare — see §4                                                    |
+| `zi_title`      | Z   | `jobTitle`             | Free in search. Part of phase 2, already paid for.                                           |
+| `accuracy`      | AA  | `contactAccuracyScore` | Confidence signal                                                                            |
+| `notes`         | AB  | derived                | Multiple matches, low accuracy, etc.                                                         |
 
 Then: filter to `status = ACTIVE`, save as `verified.xlsx` — that's phase 2's input.
 
@@ -161,9 +212,10 @@ Build the ID map for free, in two passes, with zero extra API calls:
 
 For accounts that never get a clean hit, fall back to a company-search lookup for those few.
 
-> **Resolved by the live response:** search accepts `fullName`, so there is no first/last name
-> splitting to get wrong. And the present-company assumption (previously the biggest risk) is
-> confirmed.
+> **Present-company assumption confirmed** against the live response. (Superseded: this used to also
+> claim `fullName` search avoided first/last name issues — the design switched to separate
+> `firstName`/`lastName` fields since ZoomInfo's API accepts them individually, and live testing then
+> surfaced a real first-name failure mode. See §3's Search field fallback note.)
 
 ---
 
@@ -182,13 +234,33 @@ Keeping them separate is what stops the tool from confidently reporting good con
 
 ## 6. Build order
 
-> **Status (2026-07-20):** steps 0–2 done and committed. `cli.ts` is finished and verified:
-> parse (`parseArgs`) → help/no-args early exit (prints USAGE, exit 0) → validate → dispatch,
-> failures thrown and funneled to the one top-level `.catch` (message + USAGE, exit 1). `search`
-> hands off to a `runSearch()` stub in `search.ts`; `enrich` throws on purpose. Both the tsx dev
-> loop and the compiled `dist/` build are verified working. Step 3 (`auth.ts`) is implemented but
-> not yet smoke-tested against the live token endpoint. **Pick up at step 4**, and confirm step 3
-> works for real along the way.
+> **Status (end of day, 2026-07-20):** steps 0–4 done. `cli.ts`, `auth.ts` unchanged from prior
+> status — both verified working. **Step 4 (`excel.ts`) is done:** `readContacts(filePath)` is now
+> the only exported entry point — it opens the workbook, grabs the `Carter` tab, builds the header →
+> column map, and returns `ContactRow[]` (`rowNumber`, `firstName`, `lastname`, `company`, `email`),
+> keyed off header text rather than hardcoded columns. `readExcelSheet`/`getHeaders`/`readRows` are
+> now private helpers, not exported. Dev cap is currently 200 rows (`getRows(2, 200)`) — raise this
+> when doing a full run. Multi-tab expansion (`Zoe`/`Kylie`) is still an open, undecided question.
+> **Step 5 (`zoominfo.ts`) is partly done:** `contactSearch()` sends a live, working request (fixed a
+> `400` caused by sending `"type": "contactSearch"` instead of the required `"ContactSearch"` casing)
+> and is verified against real data. **Live testing today surfaced a real gap** — see §3's new
+> "Search field fallback" note — so `contactSearch()`'s fixed 4-argument shape needs to change to
+> accept partial criteria before it's usable in the real per-contact loop. `search.ts` is currently
+> just ad-hoc single-contact test wiring, not the real workflow.
+>
+> **Pick up here tomorrow, in order:**
+> 1. Change `contactSearch()` to take partial criteria (e.g. `{ firstName?, lastName?, companyName?,
+>    email? }`), building the request `attributes` from whatever's provided instead of always four
+>    fixed fields.
+> 2. In `search.ts`, build the real per-contact loop over all loaded contacts: try name+company,
+>    fall back to email-alone if `totalResults === 0`, rate-limit per §2 (25, wait a second, repeat).
+>    Add phone as a third fallback only if email-only proves insufficient once judged against a real
+>    run — not before.
+> 3. Derive `ACTIVE`/`INACTIVE`/`NOT_FOUND` per §3's table — not built yet at all.
+> 4. Build `writeResults()` in `excel.ts` (doesn't exist yet) — this is the piece needed to actually
+>    produce an output workbook, which is tomorrow's goal.
+> `cache.ts` (§5) is still unstarted — worth doing before a full 2,880-row run, not required to hit
+> tomorrow's goal of one full pass with output.
 
 0. ~~Verify the search response returns the _present_ company.~~ **Done** — see §3.
 1. ~~`.gitignore` `data/` and `.env` — first commit, before any real sheet lands in the repo.~~
@@ -198,19 +270,25 @@ Keeping them separate is what stops the tool from confidently reporting good con
    Credentials Flow: `CLIENT_ID` / `CLIENT_SECRET` from `.env`, exchanged via HTTP Basic auth for a
    bearer token (`POST /gtm/oauth/v1/token`, `grant_type=client_credentials`). The token is cached
    in memory and re-minted automatically once it's within 60s of `expires_in` — `zoominfo.ts` just
-   calls `getBearerToken()` and never learns where tokens come from. **Still TODO:** create and
-   commit `.env.example` with placeholder keys; do a live smoke test against the token endpoint.
-4. `excel.ts` — `npm install exceljs`, read the real sheet, print the rows. Confirm every row has a
-   usable company value. _(A wall of rows with no company means `NOT_FOUND` will be meaningless —
-   find that out now, not at row 400.)_ No pre-flight existence check here — cli.ts already gated
-   the path; excel.ts's job is making the _open_ failure readable (locked-by-Excel, vanished file)
-   by rethrowing with the path and a hint.
-5. `zoominfo.ts` — `contactSearch()` per §3, token via `getToken()`. First milestone: one hardcoded
-   contact, raw response printed, compared against §3's verified sample.
-6. Status logic + `cache.ts`. Run on **10 rows**. Check every result by hand.
-7. Then 100 rows — this is where you eyeball for false `INACTIVE`s and decide whether §4's pass-2
-   company-ID compare is needed. Then all 2,880.
-8. Write the output sheet + summary line (`X active, Y inactive, Z not found`).
+   calls `getBearerToken()` and never learns where tokens come from. `.env.example` committed with
+   placeholder keys; live smoke test against the token endpoint passed.
+4. ~~`excel.ts` — reads the real sheet into `ContactRow[]`, keyed off the header row.~~ **Done.**
+   `readContacts(filePath)` is the sole export; `readExcelSheet`/`getHeaders`/`readRows` are private
+   helpers underneath it. No pre-flight existence check — cli.ts already gated the path; `excel.ts`'s
+   job is making the _open_ failure readable (locked-by-Excel, vanished file, missing column) by
+   rethrowing with the path and a hint. Still open: multi-tab expansion, and `writeResults()` (step 8)
+   doesn't exist yet.
+5. `zoominfo.ts` — **partly done.** `contactSearch()` sends a live, working request and is verified
+   against real data. **Still needed:** change its signature to accept partial criteria so it can be
+   called with just name+company, or just email, per §3's fallback design — see the build-order
+   status note above for tomorrow's exact order of operations.
+6. Status logic + fallback loop + `cache.ts`. Run on the current 200-row dev cap first. Check results
+   by hand, paying particular attention to `NOT_FOUND`s — confirm the fallback is actually catching
+   the nickname/stale-email cases from §3, not just the name+company common case.
+7. Then raise the cap toward all 2,880 — this is where you eyeball for false `INACTIVE`s and decide
+   whether §4's pass-2 company-ID compare is needed.
+8. Write the output sheet + summary line (`X active, Y inactive, Z not found`). Not built yet —
+   needed to hit the "run the sheet through the tool and get an output" goal.
 9. Trim to `ACTIVE`, and stop. Phase 1 is done.
 
 **Phase 2, later:** `enrich.ts` reads `verified.xlsx`, enriches by `personId`, writes title / email /
