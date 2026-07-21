@@ -1,6 +1,6 @@
 {
   "name": "salesforce-contact-auditor",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "A tool for auditing Salesforce contact exports against ZoomInfo's API for employment status & contact information.",
   "homepage": "https://github.com/CarterIrish/Salesforce-Contact-Auditor#readme",
   "bugs": {

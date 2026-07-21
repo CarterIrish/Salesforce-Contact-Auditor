@@ -143,3 +143,6 @@ vite.config.ts.timestamp-*
 .vite/
 
 data/
+
+# Claude Code personal settings
+.claude/settings.local.json
