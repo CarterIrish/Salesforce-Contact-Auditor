@@ -2,19 +2,29 @@
 // derive ACTIVE / INACTIVE / NOT_FOUND, write the annotated sheet.
 import { ContactRow, readContacts } from './excel';
 import { contactSearch } from './zoominfo';
+import { getBearerToken } from './auth';
 
 export const runSearch = async (inputFile: string): Promise<void> => {
   const contacts = await readContacts(inputFile);
   console.log(`Read ${contacts.length} contacts from ${inputFile}`);
   console.log(contacts.map(c => `${c.firstName} ${c.lastname} @ ${c.company} <${c.email}>`).join('\n'));
 
-  // TODO: loop over `contacts`, rate-limited per architecture.md §2 (send 25, wait a second, repeat)
-  //   TODO: try contactSearch({ firstName, lastName, companyName }) first
-  //   TODO: if totalResults === 0, fall back to contactSearch({ email }) — see §3 "Search field
-  //         fallback". Only mark NOT_FOUND once every fallback with data available is exhausted.
-  //   TODO: derive ACTIVE / INACTIVE / NOT_FOUND from the response per §3's "Deriving status" table
-  //   TODO: collect each contact's result (status, personId, zi_company, zi_company_id, zi_title,
-  //         accuracy, notes — see §3 "Output columns") for the write step below
+  const chunksize = 25;
+  const chunks: ContactRow[][] = [];
+  for (let i = 0; i < contacts.length; i += chunksize) {
+    chunks.push(contacts.slice(i, i + chunksize));
+  }
+
+  const allResults: SearchResult[] = [];
+  for (const [index, chunk] of chunks.entries()) {
+    console.log(`Processing chunk ${index + 1} of ${chunks.length} (${chunk.length} contacts)`);
+    const results = await Promise.all(chunk.map(processContact));
+    allResults.push(...results);
+
+    console.log(`Results for chunk ${index + 1}:`);
+    console.table(results);
+    await new Promise(resolve => setTimeout(resolve, 1000)); // 1s delay between chunks to avoid rate limits
+  }
 
   // TODO: excel.writeResults(inputFile, results) — writeResults() doesn't exist yet, see excel.ts
   // TODO: print the summary line (X active, Y inactive, Z not found) per §6 step 8
@@ -41,7 +51,7 @@ const processContact = async (contact: ContactRow): Promise<SearchResult> => {
 
     // If no results, fall back to searching by email
     if (response.meta.totalResults === 0 && contact.email) {
-      response = await contactSearch({ email: contact.email });
+      response = await contactSearch({ emailAddress: contact.email });
     }
 
     // Derive status from the response

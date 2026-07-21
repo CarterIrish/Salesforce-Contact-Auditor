@@ -3,6 +3,7 @@ const EXPIRY_SAFETY_MARGIN_MS = 60_000;
 
 let cachedToken: string | undefined;
 let cachedTokenExpiresAt = 0;
+let pendingFetch: Promise<string> | undefined;
 
 /**
  *  Fetches a new Bearer Token from ZoomInfo using client credentials.
@@ -49,11 +50,19 @@ const getBearerToken = async (): Promise<string> => {
     if (cachedToken && Date.now() < cachedTokenExpiresAt) {
         return cachedToken;
     }
-
-    const { token, expiresInSeconds } = await fetchToken();
-    cachedToken = token;
-    cachedTokenExpiresAt = Date.now() + expiresInSeconds * 1000 - EXPIRY_SAFETY_MARGIN_MS;
-    return cachedToken;
-}
+    if (pendingFetch) {
+        return pendingFetch;
+    }
+    pendingFetch = fetchToken()
+        .then(({ token, expiresInSeconds }) => {
+            cachedToken = token;
+            cachedTokenExpiresAt = Date.now() + expiresInSeconds * 1000 - EXPIRY_SAFETY_MARGIN_MS;
+            return token;
+        })
+        .finally(() => {
+            pendingFetch = undefined;
+        });
+    return pendingFetch;
+};
 
 export { getBearerToken };
