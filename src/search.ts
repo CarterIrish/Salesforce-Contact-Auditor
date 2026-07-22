@@ -12,24 +12,12 @@ export const runSearch = async (inputFile: string): Promise<void> => {
   const contacts = await readContacts(inputFile);
   console.log(`Read ${contacts.length} contacts from ${inputFile}`);
 
-  const chunksize = 25;
-  const chunks: ContactRow[][] = [];
-  for (let i = 0; i < contacts.length; i += chunksize) {
-    chunks.push(contacts.slice(i, i + chunksize));
-  }
-
-  const allResults: SearchResult[] = [];
-  for (const [index, chunk] of chunks.entries()) {
-    console.log(`Processing chunk ${index + 1} of ${chunks.length} (${chunk.length} contacts)`);
-    const results = await Promise.all(chunk.map(processContact));
-    allResults.push(...results);
-
-    console.log(`Results for chunk ${index + 1}:`);
-    console.table(results);
-  }
+  // Process each contact and collect results
+  const allResults: SearchResult[] = await Promise.all(contacts.map(contact => processContact(contact)));
 
   cache.saveCache(CACHE_FILE_PATH);
   
+  // Build the summary of results
   let errorCount = 0;
   let activeCount = 0;
   let inactiveCount = 0;
