@@ -30,9 +30,9 @@ salesforce-contact-auditor/
 │   ├── cli.ts         # The only entry point.  npm run dev -- search data/input/contacts.xlsx
 │   ├── search.ts      # Phase 1 workflow — runSearch(inputFile), dispatched by cli.ts
 │   ├── enrich.ts      # Phase 2 workflow — later. Until built, the subcommand throws.
-│   ├── auth.ts        # getToken() — the token seam. See §6 step 3.
-│   ├── zoominfo.ts    # contactSearch(), contactEnrich()
-│   ├── excel.ts       # readRows(), writeResults()
+│   ├── auth.ts        # getBearerToken() — the token seam. See §6 step 3.
+│   ├── zoominfo.ts    # contactSearch() + request-level throttle. contactEnrich() later.
+│   ├── excel.ts       # readContacts() (built), writeResults() (not built yet)
 │   └── cache.ts       # ~10 lines. Keyed JSON file. See §5.
 ├── dist/              # tsc output, gitignored. npm start runs dist/cli.js.
 ├── data/              # GITIGNORED — real people's PII. Verified: test.xlsx is ignored.
@@ -52,8 +52,21 @@ builds to `dist/` (`npm start`). CommonJS package (ESM `import` syntax, compiled
 natively; `node16` resolution rejects that.
 
 No test framework, no CLI framework (arg parsing is `parseArgs` from `node:util`), no validation
-library, no rate-limit library. Rate limiting is four lines: send 25, wait a second, repeat. At
-2,880 rows the run takes ~2 minutes.
+library, no rate-limit library. **Rate limiting** is a hand-rolled request-level throttle in
+`zoominfo.ts` (`throttle()` + a module-level `nextSlot`): every request reserves the next time slot
+synchronously before awaiting, so concurrent callers get spaced out instead of bursting. ZoomInfo's
+documented limits are 25 req/s, 54,000/hr, 648,000/day; only the per-second limit binds a single run
+(2,880 rows + fallbacks ≈ 5,760 requests, far under the hourly/daily caps), and the throttle paces to
+**20 req/s** for headroom — pacing at exactly 25 trips 429s on jitter/clock-skew. A full run is
+~2.5–5 minutes.
+
+> **Superseded design (2026-07-21):** this section used to read "rate limiting is four lines: send 25,
+> wait a second, repeat," done at the chunk level in `search.ts`. That undercounted — each contact
+> fires 1–2 requests (name+company, then the email fallback), so a 25-contact chunk was 25–50
+> requests, and `Promise.all` fired them as a burst rather than paced. Both caused 429s. Throttling
+> moved to the request level (every request passes through `contactSearch`, fallbacks included) so the
+> limit counts requests, not contacts. The chunk loop in `search.ts` is now redundant, slated for
+> removal.
 
 **One entry point, not two.** An earlier revision of this doc specced separate entry files per phase
 so enrich could never fire by accident. The design moved to a single `cli.ts` routing `search` /
@@ -91,21 +104,27 @@ never modified**, including `L` (`Contact Status`) — that's a CRM-managed fiel
 overwrite. See Output columns below.
 
 **Endpoint:** `POST https://api.zoominfo.com/gtm/data/v1/contacts/search` (JSON:API —
-`content-type: application/vnd.api+json`). One contact per request; **no batching**. 2,880 rows =
-2,880 requests ≈ 2 minutes at 25/sec.
+`content-type: application/vnd.api+json`). One contact per request; **no batching**. ~2,880 rows +
+fallbacks, paced at 20 req/s ≈ 2.5–5 minutes (see §2 rate limiting).
 
 ```jsonc
 {
   "data": {
-    "type": "ContactSearch",
+    "type": "ContactSearch", // ← exact casing required; "contactSearch" returns 400
     "attributes": {
-      "fullName": "Paul Adams",
+      "firstName": "Paul",
+      "lastName": "Adams",
       "companyName": "CrunchTime! Information Systems Inc",
       "companyPastOrPresent": "pastAndPresent", // ← the whole design rests on this
     },
   },
 }
 ```
+
+The email fallback (§ "Search field fallback") sends a single `"emailAddress"` attribute instead —
+**`email` is not a valid field name** and returns `400 PFAPI0005 "Invalid field requested"` (learned
+live 2026-07-21). `contactSearch()` builds `attributes` from whatever partial criteria it's given and
+adds `companyPastOrPresent` only when a `companyName` is present.
 
 `pastAndPresent` widens _what the search matches on_ (present **or** past employment) while the
 response still reports _where the person is now_. That collapses all three statuses into one call.
@@ -140,8 +159,8 @@ one assumption that could have silently invalidated the design. It holds.
 | Condition                      | Status                                                                    |
 | ------------------------------ | ------------------------------------------------------------------------- |
 | `meta.totalResults == 0`       | `NOT_FOUND` — no record of this person at this company, ever              |
-| `company` **==** input company | `ACTIVE`                                                                  |
-| `company` **!=** input company | `INACTIVE` — matched on past employment; they've moved on                 |
+| normalized `company` **==** input | `ACTIVE` (compare is normalized — see §4)                              |
+| normalized `company` **!=** input | `INACTIVE` — matched on past employment; they've moved on             |
 | `totalResults > 1`             | Take `data[0]` (default sort, `-relevance`); flag in `notes` for human review |
 
 > **Not sorting by `contactAccuracyScore`** (decided 2026-07-21): the score measures ZoomInfo's
@@ -172,11 +191,17 @@ match.
 
 **Design: sequential fallback, not a combined request.** Try `firstName` + `lastName` +
 `companyName` first (cheapest, correct for the common case). If `totalResults === 0`, retry with
-`email` alone. Only mark `NOT_FOUND` once every fallback with data available has come back empty.
+`emailAddress` alone. Only mark `NOT_FOUND` once every fallback with data available has come back empty.
 `contactSearch()` needs to accept partial criteria (not a fixed argument list) so `search.ts` can
 call it multiple times with different subsets — each attempt is its own request, not a combined one.
 Phone is a candidate third fallback (it hit for the nickname case above); hold off building it until
 email-only has been tried against the real run and judged insufficient.
+
+> **Built (2026-07-21):** the sequential fallback is implemented in `processContact` — name+company
+> first, then a single `emailAddress`-only retry when `totalResults === 0` and an email exists. The
+> fallback field is `emailAddress`, not `email` (see the endpoint note above). Phone as a third
+> fallback is still deferred, and the fallback hasn't been specifically re-verified against real
+> nickname/stale-email cases post-fix — check that during the first full run.
 
 ### Output columns
 
@@ -190,6 +215,11 @@ Existing columns (A–U) untouched, per the input schema note above. New columns
 | `zi_company_id` | Y   | `company.id`           | Powers the exact company compare — see §4                                                    |
 | `zi_title`      | Z   | `jobTitle`             | Free in search. Part of phase 2, already paid for.                                           |
 | `notes`         | AA  | derived                | Multiple matches, or the error message when `status` is `ERROR`.                             |
+
+> **Not built yet (2026-07-21):** `writeResults()` doesn't exist. `search.ts` currently prints the
+> per-row results and a summary tally to the terminal but writes nothing back to the sheet. Building
+> it is the top of tomorrow's list (§6). Note: `personId` must be written as **text** — as a number,
+> `"14062844524"` renders as `1.40628E+10`.
 
 Then: filter to `status = ACTIVE`, save as `verified.xlsx` — that's phase 2's input.
 
@@ -218,6 +248,16 @@ Build the ID map for free, in two passes, with zero extra API calls:
 
 For accounts that never get a clean hit, fall back to a company-search lookup for those few.
 
+> **Pass 1 built; Pass 2 deferred (2026-07-21).** The normalized string compare is implemented —
+> `normalizeCompanyName` in `search.ts`: lowercase, strip punctuation and
+> `inc/incorporated/corp/corporation/llc/ltd/co/company`. On a 50-row sample it flipped 7 false
+> `INACTIVE`s to `ACTIVE` (5→12 active; `NOT_FOUND` unchanged at 29 — the right signal, since
+> normalization only touches the ACTIVE/INACTIVE compare, not findability). But residue remains:
+> eyeballing showed genuine same-company mismatches normalization can't bridge (abbreviations,
+> rebrands). **Decision:** rather than build the `company.id` two-pass now, surface `zi_company`
+> (column X) in the output so a human can adjudicate the remaining `INACTIVE`s by eye. Revisit the
+> two-pass only if that residue proves too large to review by hand.
+
 > **Present-company assumption confirmed** against the live response. (Superseded: this used to also
 > claim `fullName` search avoided first/last name issues — the design switched to separate
 > `firstName`/`lastName` fields since ZoomInfo's API accepts them individually, and live testing then
@@ -240,33 +280,43 @@ Keeping them separate is what stops the tool from confidently reporting good con
 
 ## 6. Build order
 
-> **Status (end of day, 2026-07-20):** steps 0–4 done. `cli.ts`, `auth.ts` unchanged from prior
-> status — both verified working. **Step 4 (`excel.ts`) is done:** `readContacts(filePath)` is now
-> the only exported entry point — it opens the workbook, grabs the `Carter` tab, builds the header →
-> column map, and returns `ContactRow[]` (`rowNumber`, `firstName`, `lastname`, `company`, `email`),
-> keyed off header text rather than hardcoded columns. `readExcelSheet`/`getHeaders`/`readRows` are
-> now private helpers, not exported. Dev cap is currently 200 rows (`getRows(2, 200)`) — raise this
-> when doing a full run. Multi-tab expansion (`Zoe`/`Kylie`) is still an open, undecided question.
-> **Step 5 (`zoominfo.ts`) is partly done:** `contactSearch()` sends a live, working request (fixed a
-> `400` caused by sending `"type": "contactSearch"` instead of the required `"ContactSearch"` casing)
-> and is verified against real data. **Live testing today surfaced a real gap** — see §3's new
-> "Search field fallback" note — so `contactSearch()`'s fixed 4-argument shape needs to change to
-> accept partial criteria before it's usable in the real per-contact loop. `search.ts` is currently
-> just ad-hoc single-contact test wiring, not the real workflow.
+> **Status (end of day, 2026-07-21):** Phase 1 now runs clean end-to-end against real data — reads
+> the sheet, searches every contact (name+company, then the email fallback), derives status, and
+> prints per-row results plus a summary tally (`X active, Y inactive, Z not found, N errors`). Every
+> error class hit during today's first bulk runs is closed:
+> - **Auth cold-start stampede (401s).** The 25 concurrent first-chunk calls each saw an empty token
+>   cache and fired their own token fetch; ZoomInfo invalidates all but the last, so the whole first
+>   chunk 401'd. Fixed in `auth.ts` with an in-flight-promise guard (`pendingFetch`) so concurrent
+>   callers share a single fetch; it also now uses the real `expires_in` and clears the guard via
+>   `.finally()` so a failed fetch can't permanently poison auth.
+> - **`email` field 400s.** The fallback sent an `email` attribute, but the endpoint only accepts
+>   `emailAddress` (`400 PFAPI0005`) — meaning *every* fallback had been silently failing. Fixed.
+> - **429 rate-limit.** Chunk-level pacing undercounted fallbacks and burst via `Promise.all`.
+>   Replaced with a request-level throttle at 20 req/s in `zoominfo.ts`; 429s went to zero. See §2.
+> - **False `INACTIVE`s from company-name mismatch.** `normalizeCompanyName` added; residual
+>   mismatches handled by surfacing `zi_company` for human review. See §4.
+>
+> Committed and pushed; version bumped to **0.2.0**. Still on the **200-row dev cap** — no full
+> 2,880-row run yet.
 >
 > **Pick up here tomorrow, in order:**
-> 1. Change `contactSearch()` to take partial criteria (e.g. `{ firstName?, lastName?, companyName?,
->    email? }`), building the request `attributes` from whatever's provided instead of always four
->    fixed fields.
-> 2. In `search.ts`, build the real per-contact loop over all loaded contacts: try name+company,
->    fall back to email-alone if `totalResults === 0`, rate-limit per §2 (25, wait a second, repeat).
->    Add phone as a third fallback only if email-only proves insufficient once judged against a real
->    run — not before.
-> 3. Derive `ACTIVE`/`INACTIVE`/`NOT_FOUND` per §3's table — not built yet at all.
-> 4. Build `writeResults()` in `excel.ts` (doesn't exist yet) — this is the piece needed to actually
->    produce an output workbook, which is tomorrow's goal.
-> `cache.ts` (§5) is still unstarted — worth doing before a full 2,880-row run, not required to hit
-> tomorrow's goal of one full pass with output.
+> 1. **Build `writeResults()` in `excel.ts`** — the last piece before there's an actual output file
+>    (tomorrow's headline goal). Writes derived columns V–AA keyed by `rowNumber`, leaves A–U
+>    untouched, writes `personId` as **text**, and saves to a *new* file under `data/output/` — never
+>    overwrite the input. Then wire the `writeResults(...)` call into `search.ts` (the TODO at the end
+>    of `runSearch`).
+> 2. **Fix the `[object Object]` email bug in `excel.ts`.** Hyperlinked email cells come back from
+>    ExcelJS as `{ text, hyperlink }` objects, so `readRows`' `.value?.toString()` yields
+>    `"[object Object]"`, which then poisons the email fallback for those rows. Extract the display
+>    text (e.g. `cell.text`, or handle the object shape). Same file as (1) — do them together.
+> 3. **Cleanup:** remove the now-redundant chunk loop + 1s inter-chunk sleep in `search.ts` (the
+>    request-level throttle handles pacing now), and drop the now-unused `getBearerToken` import there.
+> 4. **Then** raise the dev cap toward the full 2,880 and do a real run (step 7): eyeball false
+>    `INACTIVE`s and the `NOT_FOUND` rate, and decide whether §4's `company.id` two-pass is worth it.
+>
+> Optional / not blocking tomorrow's goal: **429 retry-with-backoff** in `contactSearch` (the throttle
+> alone got 429s to zero on the dev run, but a longer full run or shared-account usage could still
+> 429 — a good insurance policy before the first full run), and **`cache.ts`** (§5).
 
 0. ~~Verify the search response returns the _present_ company.~~ **Done** — see §3.
 1. ~~`.gitignore` `data/` and `.env` — first commit, before any real sheet lands in the repo.~~
@@ -276,25 +326,30 @@ Keeping them separate is what stops the tool from confidently reporting good con
    Credentials Flow: `CLIENT_ID` / `CLIENT_SECRET` from `.env`, exchanged via HTTP Basic auth for a
    bearer token (`POST /gtm/oauth/v1/token`, `grant_type=client_credentials`). The token is cached
    in memory and re-minted automatically once it's within 60s of `expires_in` — `zoominfo.ts` just
-   calls `getBearerToken()` and never learns where tokens come from. `.env.example` committed with
-   placeholder keys; live smoke test against the token endpoint passed.
+   calls `getBearerToken()` and never learns where tokens come from. **Concurrency-safe** (added
+   2026-07-21): an in-flight-promise guard (`pendingFetch`) means N simultaneous callers share one
+   token fetch instead of stampeding the token endpoint — see the §6 status note for the 401 bug this
+   fixed. `.env.example` committed with placeholder keys; live smoke test against the token endpoint
+   passed.
 4. ~~`excel.ts` — reads the real sheet into `ContactRow[]`, keyed off the header row.~~ **Done.**
    `readContacts(filePath)` is the sole export; `readExcelSheet`/`getHeaders`/`readRows` are private
    helpers underneath it. No pre-flight existence check — cli.ts already gated the path; `excel.ts`'s
    job is making the _open_ failure readable (locked-by-Excel, vanished file, missing column) by
    rethrowing with the path and a hint. Still open: multi-tab expansion, and `writeResults()` (step 8)
    doesn't exist yet.
-5. `zoominfo.ts` — **partly done.** `contactSearch()` sends a live, working request and is verified
-   against real data. **Still needed:** change its signature to accept partial criteria so it can be
-   called with just name+company, or just email, per §3's fallback design — see the build-order
-   status note above for tomorrow's exact order of operations.
-6. Status logic + fallback loop + `cache.ts`. Run on the current 200-row dev cap first. Check results
-   by hand, paying particular attention to `NOT_FOUND`s — confirm the fallback is actually catching
-   the nickname/stale-email cases from §3, not just the name+company common case.
-7. Then raise the cap toward all 2,880 — this is where you eyeball for false `INACTIVE`s and decide
-   whether §4's pass-2 company-ID compare is needed.
-8. Write the output sheet + summary line (`X active, Y inactive, Z not found`). Not built yet —
-   needed to hit the "run the sheet through the tool and get an output" goal.
+5. ~~`zoominfo.ts` — `contactSearch()` accepts partial criteria per §3's fallback.~~ **Done.** Takes
+   a `ContactSearchCriteria` object, builds `attributes` from whatever's provided, adds
+   `companyPastOrPresent` only with a `companyName`, and guards empty criteria. Email field is
+   `emailAddress`. Includes the request-level throttle (§2). Still returns `any` — no response typing.
+6. ~~Status logic + fallback loop.~~ **Done** in `search.ts` / `processContact` (name+company →
+   `emailAddress` fallback → `ACTIVE`/`INACTIVE`/`NOT_FOUND`/`ERROR`). `cache.ts` **not built** —
+   still worth doing before repeated full runs (§5). The fallback catching nickname/stale-email cases
+   hasn't been re-verified post-fix; check during the full run.
+7. **In progress.** Normalization (§4 Pass 1) added and eyeballed on a 50-row sample; still on the
+   200-row dev cap. Raising toward all 2,880 and the false-`INACTIVE` / `company.id` decision is
+   tomorrow's step 4 (see status note).
+8. **Partly done.** The summary line prints (`X active, Y inactive, Z not found, N errors`). The
+   output *sheet* (`writeResults()`) is not built — tomorrow's headline (see status note).
 9. Trim to `ACTIVE`, and stop. Phase 1 is done.
 
 **Phase 2, later:** `enrich.ts` reads `verified.xlsx`, enriches by `personId`, writes title / email /
