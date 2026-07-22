@@ -68,5 +68,16 @@ const saveCache = (filePath: string): void => {
     }
 };
 
-export { loadCache, getCached, setCached, saveCache };
+/**
+ * 
+ * @param firstName 
+ * @param lastName 
+ * @param company 
+ * @returns 
+ */
+const buildCacheKey = (firstName: string, lastName: string, company: string): string => {
+    return `${firstName} ${lastName}|${company}`;
+}
+
+export { loadCache, getCached, setCached, saveCache, buildCacheKey };
 

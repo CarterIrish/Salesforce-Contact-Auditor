@@ -2,9 +2,13 @@
 // derive ACTIVE / INACTIVE / NOT_FOUND, write the annotated sheet.
 import { ContactRow, readContacts } from './excel';
 import { contactSearch } from './zoominfo';
-import { getBearerToken } from './auth';
+import * as cache from './cache';
+
+const CACHE_FILE_PATH = 'data/cache/cache.store';
 
 export const runSearch = async (inputFile: string): Promise<void> => {
+  cache.loadCache(CACHE_FILE_PATH);
+
   const contacts = await readContacts(inputFile);
   console.log(`Read ${contacts.length} contacts from ${inputFile}`);
 
@@ -22,9 +26,10 @@ export const runSearch = async (inputFile: string): Promise<void> => {
 
     console.log(`Results for chunk ${index + 1}:`);
     console.table(results);
-    await new Promise(resolve => setTimeout(resolve, 1000)); // 1s delay between chunks to avoid rate limits
   }
 
+  cache.saveCache(CACHE_FILE_PATH);
+  
   let errorCount = 0;
   let activeCount = 0;
   let inactiveCount = 0;
@@ -60,6 +65,11 @@ export interface SearchResult {
 
 const processContact = async (contact: ContactRow): Promise<SearchResult> => {
   try {
+    let cacheKey = cache.buildCacheKey(contact.firstName, contact.lastname, contact.company);
+    let cachedContact = cache.getCached(cacheKey);
+    if (cachedContact) {
+      return cachedContact;
+    }
     // First attempt: search by name + company
     let response = await contactSearch({
       firstName: contact.firstName,
@@ -74,14 +84,16 @@ const processContact = async (contact: ContactRow): Promise<SearchResult> => {
 
     // Derive status from the response
     if (response.meta.totalResults === 0) {
+      cache.setCached(cacheKey, { rowNumber: contact.rowNumber, status: 'NOT_FOUND' });
       return { rowNumber: contact.rowNumber, status: 'NOT_FOUND' };
     }
 
     const contactMatch = response.data[0]; 
     const notes = response.meta.totalResults > 1 ? `${response.meta.totalResults} matches found, using the most relevant one.` : undefined;
     const isActive = normalizeCompanyName(contactMatch.attributes.company.name) === normalizeCompanyName(contact.company); 
-
-    return {
+    
+    // Build the SearchResult object and cache it
+    const result: SearchResult = {
       rowNumber: contact.rowNumber,
       status: isActive ? 'ACTIVE' : 'INACTIVE',
       personId: contactMatch.id,
@@ -89,9 +101,10 @@ const processContact = async (contact: ContactRow): Promise<SearchResult> => {
       zi_company_id: contactMatch.attributes.company.id,
       zi_title: contactMatch.attributes.jobTitle,
       notes
-    }
+    };
+    cache.setCached(cacheKey, result);
 
-
+    return result; // Return the result for this contact
 
   } catch (error) {
     return {
