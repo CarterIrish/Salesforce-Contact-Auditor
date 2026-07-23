@@ -1,6 +1,6 @@
 // Phase 1: read the contact sheet, check each row against ZoomInfo Contact Search,
 // derive ACTIVE / INACTIVE / NOT_FOUND, write the annotated sheet.
-import { ContactRow, readContacts } from './excel';
+import { ContactRow, readContacts, writeResults } from './excel';
 import { contactSearch } from './zoominfo';
 import * as cache from './cache';
 
@@ -32,6 +32,7 @@ export const runSearch = async (inputFile: string): Promise<void> => {
   console.log(`Summary: ${activeCount} active, ${inactiveCount} inactive, ${notFoundCount} not found, ${errorCount} errors`);
 
   // TODO: excel.writeResults(inputFile, results) — writeResults() doesn't exist yet, see excel.ts
+  await writeResults(inputFile, 'data/output/annotated_contacts.xlsx', allResults);
 };
 
 export interface SearchResult {

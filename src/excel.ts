@@ -1,5 +1,5 @@
 import ExcelJS from 'exceljs';
-
+import type { SearchResult } from './search.js';
 export interface ContactRow {
     rowNumber: number;
     firstName: string;
@@ -54,7 +54,7 @@ const readRows = async (worksheet: ExcelJS.Worksheet): Promise<ContactRow[]> => 
             throw new Error(`Missing expected column "${name}" in worksheet: ${worksheet.name}`);
         }
     }
-    const rows = worksheet.getRows(2, 200);
+    const rows = worksheet.getRows(2, worksheet.rowCount - 1); // skip header row
     if (!rows) {
         throw new Error(`No rows found in worksheet: ${worksheet.name}`);
     }
@@ -66,7 +66,7 @@ const readRows = async (worksheet: ExcelJS.Worksheet): Promise<ContactRow[]> => 
             firstName: row.getCell(headers.get('first name')!).value?.toString() ?? '',
             lastname: row.getCell(headers.get('last name')!).value?.toString() ?? '',
             company: row.getCell(headers.get('account name')!).value?.toString() ?? '',
-            email: row.getCell(headers.get('email')!).value?.toString() ?? '',
+            email: row.getCell(headers.get('email')!).text ?? '',
         };
         contactRows.push(newRow);
     }
@@ -85,6 +85,15 @@ const readContacts = async (filePath: string): Promise<ContactRow[]> => {
     return rows;
 }
 
+const setHeaders = (worksheet: ExcelJS.Worksheet): void => {
+    const headerRow = worksheet.getRow(1);
+    headerRow.getCell('V').value = 'Contact Status';
+    headerRow.getCell('W').value = 'ZoomInfo Person ID';
+    headerRow.getCell('X').value = 'ZoomInfo Company Name';
+    headerRow.getCell('Y').value = 'ZoomInfo Company ID';
+    headerRow.getCell('Z').value = 'ZoomInfo Title';
+    headerRow.getCell('AA').value = 'Notes';
+}
 
 // TODO: writeResults(filePath, results) — writes derived results into columns V-AB (see
 // architecture.md §3 "Output columns"), keyed by each result's rowNumber. Existing columns A-U must
@@ -92,4 +101,22 @@ const readContacts = async (filePath: string): Promise<ContactRow[]> => {
 // not a number, or "14062844524" renders as "1.40628E+10". Called from search.ts once the fallback
 // loop + status derivation (see search.ts TODOs) produce a results array to write.
 
-export { readContacts  };
+const writeResults = async (inputPath: string, outputPath: string, results: SearchResult[]): Promise<void> => {
+    if (inputPath === outputPath) {
+        throw new Error(`Input and output paths must be different: ${inputPath}`);
+    }
+    const worksheet = await readExcelSheet(inputPath);
+    setHeaders(worksheet);
+    for (const result of results) {
+        let row = worksheet.getRow(result.rowNumber);
+        row.getCell('V').value = result.status;
+        row.getCell('W').value = result.personId ?? '';
+        row.getCell('X').value = result.zi_company ?? '';
+        row.getCell('Y').value = result.zi_company_id?.toString() ?? '';
+        row.getCell('Z').value = result.zi_title ?? '';
+        row.getCell('AA').value = result.notes ?? '';
+    }
+    await worksheet.workbook.xlsx.writeFile(outputPath);
+}
+
+export { readContacts, writeResults };
