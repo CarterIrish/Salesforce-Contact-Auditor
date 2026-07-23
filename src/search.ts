@@ -57,7 +57,7 @@ const processContact = async (contact: ContactRow): Promise<SearchResult> => {
     let cacheKey = cache.buildCacheKey(contact.firstName, contact.lastname, contact.company);
     let cachedContact = cache.getCached(cacheKey);
     if (cachedContact) {
-      return cachedContact;
+      return { ...cachedContact, rowNumber: contact.rowNumber };
     }
     // First attempt: search by name + company
     let response = await contactSearch({
