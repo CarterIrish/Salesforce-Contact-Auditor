@@ -32,7 +32,7 @@ salesforce-contact-auditor/
 │   ├── enrich.ts      # Phase 2 workflow — later. Until built, the subcommand throws.
 │   ├── auth.ts        # getBearerToken() — the token seam. See §6 step 3.
 │   ├── zoominfo.ts    # contactSearch() + request-level throttle. contactEnrich() later.
-│   ├── excel.ts       # readContacts() (built), writeResults() (not built yet)
+│   ├── excel.ts       # readContacts() + writeResults() — both built
 │   └── cache.ts       # ~10 lines. Keyed JSON file. See §5.
 ├── dist/              # tsc output, gitignored. npm start runs dist/cli.js.
 ├── data/              # GITIGNORED — real people's PII. Verified: test.xlsx is ignored.
@@ -65,8 +65,8 @@ documented limits are 25 req/s, 54,000/hr, 648,000/day; only the per-second limi
 > fires 1–2 requests (name+company, then the email fallback), so a 25-contact chunk was 25–50
 > requests, and `Promise.all` fired them as a burst rather than paced. Both caused 429s. Throttling
 > moved to the request level (every request passes through `contactSearch`, fallbacks included) so the
-> limit counts requests, not contacts. The chunk loop in `search.ts` is now redundant, slated for
-> removal.
+> limit counts requests, not contacts. **Removed (2026-07-23):** the chunk loop is gone — `runSearch`
+> now maps every contact straight through `processContact`, each request paced by the throttle.
 
 **One entry point, not two.** An earlier revision of this doc specced separate entry files per phase
 so enrich could never fire by accident. The design moved to a single `cli.ts` routing `search` /
@@ -83,8 +83,13 @@ workflow modules trust their inputs and communicate failure by throwing.
 
 The real export (`data/input/ContactExport.xlsx`) is a multi-tab workbook, not a single sheet:
 per-person contact tabs (`Carter`, `Zoe`, `Kylie`), plus `Account List` and `Summary` (unused).
-`readExcelSheet()` currently hardcodes the `'Carter'` tab for development; expand to the others
-later (CLI positional arg, or just hardcode per run — not yet decided).
+`readExcelSheet()` currently hardcodes the `'Carter'` tab, which is what the first full run used.
+Running the `Zoe` and `Kylie` tabs is scheduled next (target: Monday 2026-07-27, once those interns
+freeze their sheets). Blocker: parameterize the sheet name and thread it through **both**
+`readExcelSheet` callers — `readContacts()` and `writeResults()` — so read and write always target
+the same tab (otherwise one tab's results get written onto another's rows), and give each tab its own
+output filename. First verify `Zoe`/`Kylie` share Carter's column layout and that V–AA are empty
+there.
 
 Column layout on a contact tab, confirmed live (`B`, `E`, `K` are hidden in Excel — invisible when
 reading the header row by eye, but present and readable via ExcelJS same as any other column):
@@ -99,9 +104,10 @@ reading the header row by eye, but present and readable via ExcelJS same as any 
 | F   | Created Date            | M   | Title                            | T   | Email Opt Out      |
 | G   | Created By              | N   | Department                       | U   | NOTES              |
 
-`V` through `AC` are confirmed empty — that's where this tool writes. **Existing columns (A–U) are
-never modified**, including `L` (`Contact Status`) — that's a CRM-managed field, not this tool's to
-overwrite. See Output columns below.
+`V` through `AC` are confirmed empty on the `Carter` tab — that's where this tool writes; re-confirm
+on `Zoe`/`Kylie` before the Monday run. **Existing columns (A–U) are never modified**, including `L`
+(`Contact Status`) — that's a CRM-managed field, not this tool's to overwrite. See Output columns
+below.
 
 **Endpoint:** `POST https://api.zoominfo.com/gtm/data/v1/contacts/search` (JSON:API —
 `content-type: application/vnd.api+json`). One contact per request; **no batching**. ~2,880 rows +
@@ -212,14 +218,17 @@ Existing columns (A–U) untouched, per the input schema note above. New columns
 | `status`        | V   | derived                | `ACTIVE` / `INACTIVE` / `NOT_FOUND` / `ERROR`                                                |
 | `personId`      | W   | `data[0].id`           | **Phase 2's key.** Write as **text** — `"14062844524"` as a number renders as `1.40628E+10`. |
 | `zi_company`    | X   | `company.name`         | Lets a human sanity-check every `INACTIVE`                                                   |
-| `zi_company_id` | Y   | `company.id`           | Powers the exact company compare — see §4                                                    |
+| `zi_company_id` | Y   | `company.id`           | Ground-truth company match; feeds the AI INACTIVE review (§4). Written as **text** — see below. |
 | `zi_title`      | Z   | `jobTitle`             | Free in search. Part of phase 2, already paid for.                                           |
 | `notes`         | AA  | derived                | Multiple matches, or the error message when `status` is `ERROR`.                             |
 
-> **Not built yet (2026-07-21):** `writeResults()` doesn't exist. `search.ts` currently prints the
-> per-row results and a summary tally to the terminal but writes nothing back to the sheet. Building
-> it is the top of tomorrow's list (§6). Note: `personId` must be written as **text** — as a number,
-> `"14062844524"` renders as `1.40628E+10`.
+> **Built (2026-07-23).** `writeResults(inputPath, outputPath, results)` re-opens the input workbook
+> and appends columns V–AA keyed by `rowNumber`, leaving A–U (and every other tab) untouched, then
+> saves to a separate file under `data/output/` (a guard rejects `inputPath === outputPath`). Both
+> `personId` (W) and `zi_company_id` (Y) are written as **strings**, not numbers — otherwise a long
+> all-digit ID renders as `1.40628E+10`, and even a shorter ID falls back to scientific notation in a
+> narrow General-format column. `search.ts` **awaits** the call so a write failure (e.g. the output
+> file open in Excel) surfaces through cli.ts's error net instead of an unhandled rejection.
 
 Then: filter to `status = ACTIVE`, save as `verified.xlsx` — that's phase 2's input.
 
@@ -249,7 +258,7 @@ Build the ID map for free, in two passes, with zero extra API calls:
 For accounts that never get a clean hit, fall back to a company-search lookup for those few.
 
 > **Pass 1 built; Pass 2 deferred (2026-07-21).** The normalized string compare is implemented —
-> `normalizeCompanyName` in `search.ts`: lowercase, strip punctuation and
+> `normalizeCompanyName` in `search.ts`: lowercase, strip periods and commas and
 > `inc/incorporated/corp/corporation/llc/ltd/co/company`. On a 50-row sample it flipped 7 false
 > `INACTIVE`s to `ACTIVE` (5→12 active; `NOT_FOUND` unchanged at 29 — the right signal, since
 > normalization only touches the ACTIVE/INACTIVE compare, not findability). But residue remains:
@@ -257,6 +266,16 @@ For accounts that never get a clean hit, fall back to a company-search lookup fo
 > rebrands). **Decision:** rather than build the `company.id` two-pass now, surface `zi_company`
 > (column X) in the output so a human can adjudicate the remaining `INACTIVE`s by eye. Revisit the
 > two-pass only if that residue proves too large to review by hand.
+
+> **Update (2026-07-23) — the full run reframed this.** Against all 2,885 `Carter` rows: 545 ACTIVE,
+> 911 INACTIVE, 1,429 NOT_FOUND, 0 errors. 911 INACTIVEs is too many to eyeball, so the plan is an
+> **AI adjudication pass**: diff each row's input `Account Name` (col I) against the returned
+> `zi_company` (col X), with `zi_company_id` (col Y) as the ground-truth tiebreaker, to recover false
+> INACTIVEs (spelling variants, rebrands, abbreviations). This supersedes the `company.id` two-pass —
+> an LLM handles rebrands/abbreviations an ID map alone would miss — and a recovered row already
+> carries its `personId`, so it drops straight into phase 2 with no re-search. Bias the pass toward
+> **escalating ambiguous cases to human review** rather than auto-recovering, so a genuine job change
+> (parent/subsidiary, similarly-named firm) isn't silently promoted back into the ACTIVE set.
 
 > **Present-company assumption confirmed** against the live response. (Superseded: this used to also
 > claim `fullName` search avoided first/last name issues — the design switched to separate
@@ -272,6 +291,23 @@ for one scenario: you run all 2,880 rows and the Excel writer throws on row 2,70
 fixing that bug and re-running costs another 2,880 lookups. With one, it costs zero. It's what lets
 you iterate on the output format freely.
 
+> **Built (2026-07-23)** in `cache.ts` (`loadCache` / `getCached` / `setCached` / `saveCache` /
+> `buildCacheKey`), a JSON file at `data/cache/cache.store`. Two subtleties the full run surfaced:
+> - **`rowNumber` must not be reused from the cache.** The cached value is a whole `SearchResult`
+>   including `rowNumber`, but `rowNumber` is per-row while the key is per-(name+company). On a hit,
+>   `processContact` re-stamps it from the current contact (`{ ...cached, rowNumber: contact.rowNumber }`);
+>   without that, duplicate name+company rows collide on write and some rows come out blank. The cold
+>   run hid this — `Promise.all` races past the empty cache so nothing hits it; the bug only bites a
+>   warm re-run.
+> - **The key omits the email fallback, so a warm run ≠ the cold run by a row or two.** Two rows with
+>   the same name+company but different emails can legitimately get different answers (one email hits,
+>   the other doesn't); the key collapses them to whichever was cached last. Seen as a single
+>   NOT_FOUND→INACTIVE flip on the first warm run, then stable. Within tolerance; add `email` to
+>   `buildCacheKey` if exact cold/warm reproducibility is ever needed.
+>
+> **Wipe `data/cache/cache.store` before any re-run that changes matching logic** (normalization,
+> fallback, tab handling) — stale answers are otherwise served verbatim.
+
 **Keeping `NOT_FOUND` genuinely distinct from `INACTIVE`.** A missing or misspelled company in the
 input produces an empty response — identical to "this person left." Same result, opposite meaning.
 Keeping them separate is what stops the tool from confidently reporting good contacts as dead.
@@ -280,6 +316,43 @@ Keeping them separate is what stops the tool from confidently reporting good con
 
 ## 6. Build order
 
+> **Status (2026-07-23).** First full run done — all 2,885 `Carter` rows tagged, **0 errors**:
+> **545 ACTIVE, 911 INACTIVE, 1,429 NOT_FOUND**. Everything on the 2026-07-21 pickup list below is
+> now closed: `writeResults()` built and **awaited** in `runSearch`; the `[object Object]` email bug
+> fixed (`readRows` reads `cell.text`); the chunk loop removed; the 200-row dev cap lifted
+> (`getRows(2, rowCount - 1)`). `cache.ts` built (§5), including the `rowNumber` re-stamp fix.
+> (`package.json` is still at **0.2.0** — bump to **0.3.0** with this milestone's commit.)
+>
+> **Read NOT_FOUND with care:** ~half the list. It asserts only that name+company *and* the email
+> fallback both came back empty — not that the person is truly gone. Rows with no email only ever got
+> one shot, and phone (a candidate third fallback, §3) isn't built. Treat 1,429 as an upper bound and
+> route it to manual/LinkedIn review, not as a confirmed count.
+>
+> **Downstream workflow (agreed):** ZoomInfo search for all rows → AI company-diff to recover false
+> INACTIVEs (§4) → manual review of NOT_FOUNDs. Each bucket goes to a different resolver; a recovered
+> INACTIVE already carries its `personId` for phase 2.
+>
+> **Next — finish the search branch (implementing 2026-07-24 onward).** The driving goal is a clean
+> handoff to **EchoStor** at internship end, so the next dev can follow the intent and build on it —
+> favor legibility over cleverness. Behavior gets decided at the CLI, so it's chosen at call time:
+> - **`--worksheet <name>` flag.** Replaces the hardcoded `'Carter'` in `readExcelSheet`, threaded
+>   through both callers (`readContacts` + `writeResults`) so read and write always hit the same tab.
+>   Also the source for the output filename (e.g. `annotated_<worksheet>.xlsx`), so tabs never clobber
+>   each other. On a missing tab, the error lists the workbook's actual worksheets, built dynamically
+>   from `workbook.worksheets` — **not** a hardcoded Carter/Zoe/Kylie list; if that enumeration proves
+>   unworkable, fall back to a clear generic error rather than a stale list.
+> - **`--fresh` flag.** Skips the cache **load** (re-searches every contact) but still **saves** the
+>   fresh results — the ergonomic version of the §5 "wipe before a matching-logic change" note.
+> - **Move config into `cli.ts`.** Worksheet, cache path, and output path become call-time decisions
+>   instead of constants in `search.ts`.
+> - **Cleanup / bugs for readability:** type the ZoomInfo response (drop `contactSearch`'s `any` so
+>   `processContact`'s `response.meta.totalResults` / `response.data[0].attributes…` are
+>   self-documenting); remove the dead `if (!workbook)` guard in `readExcelSheet`; fix the `'carter'`
+>   vs `'Carter'` error casing (moot once the flag lands); drop the unused `key` in `zoominfo.ts`'s
+>   destructure.
+> - **Then** run the `Zoe` and `Kylie` tabs (target 2026-07-27) and bump the version once the branch
+>   is done. Still-open insurance: **429 retry-with-backoff** in `contactSearch`.
+>
 > **Status (end of day, 2026-07-21):** Phase 1 now runs clean end-to-end against real data — reads
 > the sheet, searches every contact (name+company, then the email fallback), derives status, and
 > prints per-row results plus a summary tally (`X active, Y inactive, Z not found, N errors`). Every
@@ -332,25 +405,26 @@ Keeping them separate is what stops the tool from confidently reporting good con
    fixed. `.env.example` committed with placeholder keys; live smoke test against the token endpoint
    passed.
 4. ~~`excel.ts` — reads the real sheet into `ContactRow[]`, keyed off the header row.~~ **Done.**
-   `readContacts(filePath)` is the sole export; `readExcelSheet`/`getHeaders`/`readRows` are private
-   helpers underneath it. No pre-flight existence check — cli.ts already gated the path; `excel.ts`'s
+   `readContacts(filePath)` and `writeResults()` are the exports; `readExcelSheet`/`getHeaders`/
+   `readRows`/`setHeaders` are private helpers underneath them. No pre-flight existence check — cli.ts
+   already gated the path; `excel.ts`'s
    job is making the _open_ failure readable (locked-by-Excel, vanished file, missing column) by
-   rethrowing with the path and a hint. Still open: multi-tab expansion, and `writeResults()` (step 8)
-   doesn't exist yet.
+   rethrowing with the path and a hint. `writeResults()` now built too (§3, Output columns). Still
+   open: multi-tab expansion (the `'Carter'` hardcode in `readExcelSheet`, shared by both callers).
 5. ~~`zoominfo.ts` — `contactSearch()` accepts partial criteria per §3's fallback.~~ **Done.** Takes
    a `ContactSearchCriteria` object, builds `attributes` from whatever's provided, adds
    `companyPastOrPresent` only with a `companyName`, and guards empty criteria. Email field is
    `emailAddress`. Includes the request-level throttle (§2). Still returns `any` — no response typing.
 6. ~~Status logic + fallback loop.~~ **Done** in `search.ts` / `processContact` (name+company →
-   `emailAddress` fallback → `ACTIVE`/`INACTIVE`/`NOT_FOUND`/`ERROR`). `cache.ts` **not built** —
-   still worth doing before repeated full runs (§5). The fallback catching nickname/stale-email cases
-   hasn't been re-verified post-fix; check during the full run.
-7. **In progress.** Normalization (§4 Pass 1) added and eyeballed on a 50-row sample; still on the
-   200-row dev cap. Raising toward all 2,880 and the false-`INACTIVE` / `company.id` decision is
-   tomorrow's step 4 (see status note).
-8. **Partly done.** The summary line prints (`X active, Y inactive, Z not found, N errors`). The
-   output *sheet* (`writeResults()`) is not built — tomorrow's headline (see status note).
-9. Trim to `ACTIVE`, and stop. Phase 1 is done.
+   `emailAddress` fallback → `ACTIVE`/`INACTIVE`/`NOT_FOUND`/`ERROR`). `cache.ts` **built** (§5),
+   including the `rowNumber` re-stamp fix. The full run threw 0 errors; the fallback's effectiveness
+   on nickname/stale-email cases is folded into the NOT_FOUND review rather than separately verified.
+7. ~~Normalization + full run.~~ **Done.** `normalizeCompanyName` (§4 Pass 1) in place; the full
+   2,885-row `Carter` run completed (545 / 911 / 1,429, 0 errors). The false-`INACTIVE` question is
+   resolved in favor of an AI company-diff pass over the `company.id` two-pass (§4, 2026-07-23 update).
+8. ~~Output sheet + summary.~~ **Done.** The summary line prints, and `writeResults()` writes the
+   annotated sheet to `data/output/` (§3).
+9. Run the remaining tabs (`Zoe`, `Kylie`), then trim to `ACTIVE` → `verified.xlsx`. Phase 1 done.
 
 **Phase 2, later:** `enrich.ts` reads `verified.xlsx`, enriches by `personId`, writes title / email /
 phone.

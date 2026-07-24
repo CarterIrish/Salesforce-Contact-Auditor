@@ -21,6 +21,12 @@ Example:
   npm run dev -- search data/input/contacts.xlsx
 `
 
+/**
+ * CLI entry point. Parses argv and routes the subcommand: `search <file>` runs the audit (after
+ * checking the file exists), `enrich` throws until phase 2 is built, and `--help` or no args prints
+ * usage.
+ * @throws Error on an unknown command, a missing input file, or a nonexistent input path.
+ */
 const main = async () => {
   console.log(`Salesforce Contact Auditor | Version: ${process.env.npm_package_version}`);
   console.log(`Node.js Version: ${process.version}`);

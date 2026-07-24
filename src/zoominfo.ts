@@ -12,6 +12,11 @@ let nextSlot = 0;
 const MAX_REQUESTS_PER_SECOND = 20;
 const MIN_INTERVAL_MS = 1000 / MAX_REQUESTS_PER_SECOND;
 
+/**
+ * Request-level rate limiter: synchronously reserves the next time slot (spacing requests by
+ * MIN_INTERVAL_MS, ≈ 20 req/s) before awaiting it, so concurrent callers are paced instead of
+ * firing all at once.
+ */
 const throttle = async (): Promise<void> => {
     const now = Date.now();
     const wait = Math.max(0, nextSlot - now);
@@ -21,6 +26,14 @@ const throttle = async (): Promise<void> => {
     }
 }
 
+/**
+ * Runs one ZoomInfo Contact Search. Builds the request attributes from whatever criteria are
+ * provided (partial subsets allowed), adding companyPastOrPresent when a companyName is present,
+ * and paces the request through the throttle.
+ * @param criteria Any subset of firstName / lastName / companyName / emailAddress.
+ * @returns The parsed JSON:API response (currently untyped).
+ * @throws Error if no criteria are provided, or the request returns a non-OK status.
+ */
 const contactSearch = async (criteria: ContactSearchCriteria): Promise<any> => {
     const searchAttributes = Object.fromEntries(
         Object.entries(criteria).filter(([key, value]) => value !== undefined)

@@ -6,10 +6,10 @@ let cachedTokenExpiresAt = 0;
 let pendingFetch: Promise<string> | undefined;
 
 /**
- *  Fetches a new Bearer Token from ZoomInfo using client credentials.
- *  Caches the token and its expiry time to avoid unnecessary requests.
- *  @throws Error if CLIENT_ID or CLIENT_SECRET are not set, or if the request fails.
- * @returns Bearer Token String
+ * Fetches a fresh bearer token from ZoomInfo via the Client Credentials flow (CLIENT_ID /
+ * CLIENT_SECRET over HTTP Basic auth).
+ * @throws Error if CLIENT_ID or CLIENT_SECRET are unset, or the request fails / returns no token.
+ * @returns The token and its lifetime in seconds (expires_in, defaulting to 3600).
  */
 const fetchToken = async (): Promise<{ token: string; expiresInSeconds: number }> => {
     const clientId = process.env.CLIENT_ID;
@@ -42,9 +42,11 @@ const fetchToken = async (): Promise<{ token: string; expiresInSeconds: number }
 };
 
 /**
- * Gets a Bearer Token from ZoomInfo, using a cached token if available and valid.
+ * Returns a valid ZoomInfo bearer token - the in-memory cached one if still valid, otherwise a
+ * freshly fetched one. Concurrent callers share a single in-flight fetch (pendingFetch) so they
+ * don't stampede the token endpoint.
  * @throws Error if fetching a new token fails.
- * @returns Bearer Token String
+ * @returns Bearer token string.
  */
 const getBearerToken = async (): Promise<string> => {
     if (cachedToken && Date.now() < cachedTokenExpiresAt) {

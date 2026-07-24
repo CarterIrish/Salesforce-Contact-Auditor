@@ -4,9 +4,9 @@ import fs from 'fs';
 let cache: Record<string, SearchResult> = {};
 
 /**
- * 
- * @param filePath 
- * @returns 
+ * Loads the on-disk cache into memory. A missing file starts an empty cache (warns); a read/parse
+ * failure logs and also starts empty. Call once at the start of a run.
+ * @param filePath Path to the JSON cache store (e.g. data/cache/cache.store).
  */
 const loadCache = (filePath: string): void => {
     // Check if the cache file exists before attempting to read it
@@ -37,26 +37,28 @@ const loadCache = (filePath: string): void => {
 };
 
 /**
- * 
- * @param key 
- * @returns 
+ * Looks up a previously stored result by cache key. Callers must re-stamp `rowNumber` from the
+ * current contact.
+ * @param key Cache key from buildCacheKey().
+ * @returns The cached SearchResult, or undefined on a miss.
  */
 const getCached = (key: string): SearchResult | undefined => {
     return cache[key];
 };
 
 /**
- * 
- * @param key 
- * @param value 
+ * Stores a result under its cache key. Persisted only when saveCache() runs.
+ * @param key Cache key from buildCacheKey().
+ * @param value The SearchResult to cache.
  */
 const setCached = (key: string, value: SearchResult): void => {
     cache[key] = value;
 };
 
 /**
- * 
- * @param filePath 
+ * Writes the in-memory cache to disk as pretty-printed JSON. A write failure logs and is swallowed.
+ * A run shouldn't fail just because the cache couldn't be persisted. Call once after processing.
+ * @param filePath Path to the JSON cache store.
  */
 const saveCache = (filePath: string): void => {
     try {
@@ -69,11 +71,11 @@ const saveCache = (filePath: string): void => {
 };
 
 /**
- * 
- * @param firstName 
- * @param lastName 
- * @param company 
- * @returns 
+ * Builds the cache key. Keyed by name + company only. Case-sensitive.
+ * @param firstName Contact first name.
+ * @param lastName Contact last name.
+ * @param company Contact company (Account Name).
+ * @returns Key of the form "First Last|Company".
  */
 const buildCacheKey = (firstName: string, lastName: string, company: string): string => {
     return `${firstName} ${lastName}|${company}`;
