@@ -11,21 +11,22 @@ export interface ContactRow {
 const REQUIRED_COLUMNS = ['first name', 'last name', 'account name', 'email'];
 
 /**
- * Opens the workbook and returns the 'Carter' worksheet. 
- * Sheet name is temporarily hardcoded.
+ * Opens the workbook and returns the named worksheet.
  * @param filePath Path to the Excel file to read.
- * @returns The 'Carter' worksheet.
- * @throws Error if the file cannot be read or the 'Carter' sheet is not found.
+ * @param worksheetName Name of the worksheet tab to open.
+ * @returns The requested worksheet.
+ * @throws Error if the file cannot be read or the worksheet is not found.
  */
-const readExcelSheet = async (filePath: string): Promise<ExcelJS.Worksheet> => {
+const readExcelSheet = async (filePath: string, worksheetName: string): Promise<ExcelJS.Worksheet> => {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.readFile(filePath);
     if (!workbook) {
         throw new Error(`Failed to read Excel file: ${filePath}`);
     }
-    const worksheet = workbook.getWorksheet('Carter');
+    const worksheet = workbook.getWorksheet(worksheetName);
     if (!worksheet) {
-        throw new Error(`Worksheet 'carter' not found in file: ${filePath}`);
+        const available = workbook.worksheets.map(ws => ws.name).join(', ');
+        throw new Error(`Worksheet "${worksheetName}" not found in file: ${filePath}. Available worksheets: ${available}`);
     }
     return worksheet;
 }
@@ -84,10 +85,11 @@ const readRows = async (worksheet: ExcelJS.Worksheet): Promise<ContactRow[]> => 
 /**
  * Reads contact information from an Excel file.
  * @param filePath Path to input data
+ * @param worksheetName Name of the worksheet tab to read.
  * @returns A promise resolving to an array of ContactRow objects.
  */
-const readContacts = async (filePath: string): Promise<ContactRow[]> => {
-    const worksheet = await readExcelSheet(filePath);
+const readContacts = async (filePath: string, worksheetName: string): Promise<ContactRow[]> => {
+    const worksheet = await readExcelSheet(filePath, worksheetName);
     const rows = await readRows(worksheet);
     return rows;
 }
@@ -114,13 +116,14 @@ const setHeaders = (worksheet: ExcelJS.Worksheet): void => {
  * @param inputPath Path to the input Excel file (read-only).
  * @param outputPath Path to the output Excel file (written).
  * @param results Array of SearchResult objects, each with a rowNumber matching the input sheet.
+ * @param worksheetName Name of the worksheet tab to write into — must match the tab that was read.
  * @throws Error if inputPath === outputPath, or the workbook cannot be read or written.
  */
-const writeResults = async (inputPath: string, outputPath: string, results: SearchResult[]): Promise<void> => {
+const writeResults = async (inputPath: string, outputPath: string, results: SearchResult[], worksheetName: string): Promise<void> => {
     if (inputPath === outputPath) {
         throw new Error(`Input and output paths must be different: ${inputPath}`);
     }
-    const worksheet = await readExcelSheet(inputPath);
+    const worksheet = await readExcelSheet(inputPath, worksheetName);
     setHeaders(worksheet);
     for (const result of results) {
         let row = worksheet.getRow(result.rowNumber);

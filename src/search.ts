@@ -10,11 +10,12 @@ const CACHE_FILE_PATH = 'data/cache/cache.store';
  * Runs the phase 1 audit end to end: loads the cache, reads the contact sheet, searches every
  * contact against ZoomInfo, prints a status summary, and writes the annotated output sheet.
  * @param inputFile Path to the input contacts workbook.
+ * @param worksheetName Name of the worksheet tab to audit; also names the output file.
  */
-export const runSearch = async (inputFile: string): Promise<void> => {
+export const runSearch = async (inputFile: string, worksheetName: string): Promise<void> => {
   cache.loadCache(CACHE_FILE_PATH);
 
-  const contacts = await readContacts(inputFile);
+  const contacts = await readContacts(inputFile, worksheetName);
   console.log(`Read ${contacts.length} contacts from ${inputFile}`);
 
   // Process each contact and collect results
@@ -36,9 +37,8 @@ export const runSearch = async (inputFile: string): Promise<void> => {
 
   console.log(`Summary: ${activeCount} active, ${inactiveCount} inactive, ${notFoundCount} not found, ${errorCount} errors`);
 
-  // Write the annotated sheet. Output path is hardcoded for the single-tab (Carter) dev run;
-  // per-tab output naming is needed before running Zoe/Kylie (see architecture.md §3).
-  await writeResults(inputFile, 'data/output/annotated_contacts.xlsx', allResults);
+  // Per-tab output filename so runs against different tabs don't overwrite each other.
+  await writeResults(inputFile, `data/output/annotated_${worksheetName}.xlsx`, allResults, worksheetName);
 };
 
 export interface SearchResult {

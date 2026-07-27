@@ -8,17 +8,18 @@ const USAGE =
 `
 Salesforce Contact Auditor
 
-Usage: npm run dev -- <command> <inputFile>
+Usage: npm run dev -- <command> <inputFile> [options]
 
 Commands:
   search <inputFile>   Audit contacts: flag each as ACTIVE / INACTIVE / NOT_FOUND
   enrich <inputFile>   Pull current title/email/phone for verified contacts
 
 Options:
+  -w, --worksheet      Worksheet tab to audit (required for search)
   -h, --help           Show this help message
 
 Example:
-  npm run dev -- search data/input/contacts.xlsx
+  npm run dev -- search data/input/contacts.xlsx --worksheet Carter
 `
 
 /**
@@ -33,7 +34,7 @@ const main = async () => {
   console.log('---------------------------------------- \n \n');
   
   const args = process.argv.slice(2);
-  const {values, positionals} = parseArgs({ args, options: { help: { type: 'boolean', short: 'h' } }, allowPositionals: true });
+  const {values, positionals} = parseArgs({ args, options: { help: { type: 'boolean', short: 'h' }, worksheet: { type: 'string', short: 'w' } }, allowPositionals: true });
   if(values.help || positionals.length === 0) {
     console.log(USAGE);
     return;
@@ -48,7 +49,10 @@ const main = async () => {
       if(!existsSync(inputFile)) {
         throw new Error(`Input file "${inputFile}" does not exist.`);
       }
-      await runSearch(inputFile);
+      if(!values.worksheet) {
+        throw new Error('The --worksheet option is required for the search command.');
+      }
+      await runSearch(inputFile, values.worksheet);
       break;
     case 'enrich':
       throw new Error('The enrich command is not yet implemented.');
