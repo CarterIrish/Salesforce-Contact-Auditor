@@ -83,13 +83,11 @@ workflow modules trust their inputs and communicate failure by throwing.
 
 The real export (`data/input/ContactExport.xlsx`) is a multi-tab workbook, not a single sheet:
 per-person contact tabs (`Carter`, `Zoe`, `Kylie`), plus `Account List` and `Summary` (unused).
-`readExcelSheet()` currently hardcodes the `'Carter'` tab, which is what the first full run used.
-Running the `Zoe` and `Kylie` tabs is scheduled next (target: Monday 2026-07-27, once those interns
-freeze their sheets). Blocker: parameterize the sheet name and thread it through **both**
-`readExcelSheet` callers — `readContacts()` and `writeResults()` — so read and write always target
-the same tab (otherwise one tab's results get written onto another's rows), and give each tab its own
-output filename. First verify `Zoe`/`Kylie` share Carter's column layout and that V–AA are empty
-there.
+The tab is chosen at the CLI (`--worksheet <name>` / `-w`, required for `search`; built 2026-07-27):
+the name threads through **both** `readExcelSheet` callers — `readContacts()` and `writeResults()` —
+so read and write always target the same tab, and it names the output file
+(`data/output/annotated_<tab>.xlsx`) so tabs never clobber each other. A missing tab errors with the
+workbook's actual worksheet names. All three tabs ran clean on 2026-07-27 — see §6.
 
 Column layout on a contact tab, confirmed live (`B`, `E`, `K` are hidden in Excel — invisible when
 reading the header row by eye, but present and readable via ExcelJS same as any other column):
@@ -104,8 +102,8 @@ reading the header row by eye, but present and readable via ExcelJS same as any 
 | F   | Created Date            | M   | Title                            | T   | Email Opt Out      |
 | G   | Created By              | N   | Department                       | U   | NOTES              |
 
-`V` through `AC` are confirmed empty on the `Carter` tab — that's where this tool writes; re-confirm
-on `Zoe`/`Kylie` before the Monday run. **Existing columns (A–U) are never modified**, including `L`
+`V` through `AC` were confirmed empty on all three contact tabs — the tool writes `V`–`AB` there.
+**Existing columns (A–U) are never modified**, including `L`
 (`Contact Status`) — that's a CRM-managed field, not this tool's to overwrite. See Output columns
 below.
 
@@ -162,12 +160,24 @@ one assumption that could have silently invalidated the design. It holds.
 
 ### Deriving status
 
-| Condition                      | Status                                                                    |
-| ------------------------------ | ------------------------------------------------------------------------- |
-| `meta.totalResults == 0`       | `NOT_FOUND` — no record of this person at this company, ever              |
-| normalized `company` **==** input | `ACTIVE` (compare is normalized — see §4)                              |
-| normalized `company` **!=** input | `INACTIVE` — matched on past employment; they've moved on             |
-| `totalResults > 1`             | Take `data[0]` (default sort, `-relevance`); flag in `notes` for human review |
+**The acceptance rule (added 2026-07-27, `selectMatch` in `search.ts`):** ZoomInfo's search is fuzzy
+— it *proposes* candidates, it does not confirm identity. A candidate is **accepted** only when its
+first name AND last name equal the sheet row's (case-insensitive, whitespace-trimmed, otherwise
+character-exact). The check scans every returned candidate in order and applies identically to both
+search paths (name+company and the email fallback). Rationale: phase 2 enriches by `personId` and
+**updates Salesforce records** — a wrong-person match doesn't just mislabel a row, it overwrites a
+real contact's data. A false `NOT_FOUND` costs a manual lookup; a false `ACTIVE` corrupts a record;
+the tool fails toward the cheap error. Nicknames (`Mike` vs `Michael`), initials, and punctuation
+variants are deliberately rejected — they land in `NAME_MISMATCH` for a human to confirm, not in the
+verified set. (Fuzzy/edit-distance matching was measured and rejected — see §6, 2026-07-27.)
+
+| Condition                                        | Status                                                              |
+| ------------------------------------------------ | ------------------------------------------------------------------- |
+| No candidate returned by either search           | `NOT_FOUND` — ZoomInfo has nothing for any field we hold            |
+| Candidates returned, none accepted               | `NAME_MISMATCH` — somebody close came back, identity unverified; best candidate's details kept for review |
+| Accepted match, normalized `company` **==** input | `ACTIVE` (compare is normalized — see §4)                           |
+| Accepted match, normalized `company` **!=** input | `INACTIVE` — matched on past employment; they've moved on           |
+| `totalResults > 1`                               | First *accepted* candidate wins (API default sort, `-relevance`); flagged in `Tool Notes` |
 
 > **Not sorting by `contactAccuracyScore`** (decided 2026-07-21): the score measures ZoomInfo's
 > confidence in a single profile's own data quality (employment + email currency), not whether that
@@ -209,18 +219,33 @@ email-only has been tried against the real run and judged insufficient.
 > fallback is still deferred, and the fallback hasn't been specifically re-verified against real
 > nickname/stale-email cases post-fix — check that during the first full run.
 
+> **Updated (2026-07-27):** the fallback now retriggers on **"no accepted match"** rather than
+> `totalResults === 0`, so a wrong-person hit on name+company no longer blocks the email attempt.
+> Fallback results pass through the same name check as everything else (measured earlier: the
+> fallback carries ~14% of all matches, which is why it survived the restart).
+
 ### Output columns
 
 Existing columns (A–U) untouched, per the input schema note above. New columns append starting at `V`:
 
-| Column          | Col | Source                 | Notes                                                                                        |
-| --------------- | --- | ---------------------- | -------------------------------------------------------------------------------------------- |
-| `status`        | V   | derived                | `ACTIVE` / `INACTIVE` / `NOT_FOUND` / `ERROR`                                                |
-| `personId`      | W   | `data[0].id`           | **Phase 2's key.** Write as **text** — `"14062844524"` as a number renders as `1.40628E+10`. |
-| `zi_company`    | X   | `company.name`         | Lets a human sanity-check every `INACTIVE`                                                   |
-| `zi_company_id` | Y   | `company.id`           | Ground-truth company match; feeds the AI INACTIVE review (§4). Written as **text** — see below. |
-| `zi_title`      | Z   | `jobTitle`             | Free in search. Part of phase 2, already paid for.                                           |
-| `notes`         | AA  | derived                | Multiple matches, or the error message when `status` is `ERROR`.                             |
+| Column (header)                | Col | Source            | Notes                                                                                        |
+| ------------------------------ | --- | ----------------- | -------------------------------------------------------------------------------------------- |
+| `Inferred Contact Status`      | V   | derived           | `ACTIVE` / `INACTIVE` / `NAME_MISMATCH` / `NOT_FOUND` / `ERROR`                              |
+| `ZoomInfo Person ID`           | W   | candidate `id`    | **Phase 2's key.** Write as **text** — `"14062844524"` as a number renders as `1.40628E+10`. |
+| `ZoomInfo Company Name`        | X   | `company.name`    | Lets a human sanity-check every `INACTIVE`                                                   |
+| `ZoomInfo Company ID`          | Y   | `company.id`      | Ground-truth company match; feeds the AI INACTIVE review (§4). Written as **text** — see below. |
+| `ZoomInfo Title`               | Z   | `jobTitle`        | Free in search. Part of phase 2, already paid for.                                          |
+| `Tool Notes`                   | AA  | derived           | Multi-match note, rejected-candidate count, or the error message when `status` is `ERROR`.  |
+| `ZoomInfo Rejected Candidates` | AB  | derived           | `NAME_MISMATCH` only: up to 5 rejected candidates as `First Last (Company)` for eyeball review. |
+
+On `NAME_MISMATCH` rows, W–Z are populated from the **best (first-returned) rejected candidate** —
+deliberately, so a human who confirms the match has the `personId` in hand with no re-search. That
+personId is **unverified by definition**; it is safe only because `verified.xlsx` / phase 2 consume
+`ACTIVE` rows exclusively, and a mismatch row becomes `ACTIVE` only by explicit human edit.
+
+The V and AA headers were renamed (2026-07-27) from `Contact Status` / `Notes` to avoid duplicate
+header names against Salesforce's own columns `L` (`Contact Status`) and `U` (`NOTES`) — anything
+keying on header text would otherwise resolve ambiguously.
 
 > **Built (2026-07-23).** `writeResults(inputPath, outputPath, results)` re-opens the input workbook
 > and appends columns V–AA keyed by `rowNumber`, leaving A–U (and every other tab) untouched, then
@@ -315,6 +340,41 @@ Keeping them separate is what stops the tool from confidently reporting good con
 ---
 
 ## 6. Build order
+
+> **Status (2026-07-27, end of day). Stage 1 audit complete on all three tabs.** The day began with
+> a deliberate **restart**: the 07-24 → 07-27 branch work had over-complicated the tool, so it was
+> reset to `aa33e99` (the 2026-07-23 state) and rebuilt lean. What landed, in order:
+> - **`--worksheet` / `-w` flag** — threads through both `readExcelSheet` callers, drives the
+>   per-tab output filename `annotated_<tab>.xlsx`, and a missing tab errors with the workbook's
+>   real worksheet names.
+> - **Strict name matching** (`selectMatch`, §3 "Deriving status") — a candidate is accepted only
+>   when first AND last name equal the row's (case-insensitive/trimmed), applied response-side to
+>   both search paths; the email fallback retriggers on "no accepted match". Driven by the phase-2
+>   requirement that a `personId` must never belong to an unverified person. Fuzzy matching was
+>   measured and rejected: it could rescue only ~35 rows/tab while the exact-surname-divergent-first
+>   population (nicknames) is ~4× larger and carries weaker identity evidence — ambiguity goes to a
+>   human instead.
+> - **`NAME_MISMATCH` status + `ZoomInfo Rejected Candidates` (AB)** — candidates returned, none
+>   accepted. W–Z carry the best rejected candidate (§3 Output columns) for one-step human review.
+> - Output headers V/AA renamed to `Inferred Contact Status` / `Tool Notes` (duplicate-header
+>   collision with Salesforce's L/U columns).
+>
+> Full runs, 0 errors each: `Carter` 433 ACTIVE / 734 INACTIVE / 301 NAME_MISMATCH / 1,417 NOT_FOUND ·
+> `Zoe` 511 / 635 / 352 / 1,392 · `Kylie` 505 / 721 / 320 / 1,334 — totals **1,449 / 2,090 / 973 /
+> 4,143** over 8,655 rows, a 40.9% programmatic hit rate with an 11.2% human-review queue. The three
+> annotated tabs were combined (manually, Move-or-Copy) into **`data/output/AnnotatedContacts.xlsx`**
+> — per-tab status counts verified identical to the per-tab outputs; that file is now the working
+> copy, the three `annotated_*.xlsx` are archives.
+>
+> **Tomorrow (2026-07-28):**
+> 1. Review the 973 `NAME_MISMATCH` rows in `AnnotatedContacts.xlsx` (filter column V per tab,
+>    compare AB against the row's First/Last, flip confirmed rows in **V** — not Salesforce's L),
+>    then send the completed stage-1 sheet to **Alex**.
+> 2. **Write the phase 2 enrichment flow** (`enrich.ts` + a working `enrich` subcommand): read each
+>    row and, for verified contacts, pull current **phone + email + job title** from ZoomInfo by
+>    `personId` and update the sheet — built now so it's ready whenever EchoStor wants to run it.
+> 3. Still open behind those: `README.md` (§7), version bump 0.2.0 → 0.3.0, **commit + push**
+>    (today's work is uncommitted and `aa33e99` was never pushed).
 
 > **Status (2026-07-23).** First full run done — all 2,885 `Carter` rows tagged, **0 errors**:
 > **545 ACTIVE, 911 INACTIVE, 1,429 NOT_FOUND**. Everything on the 2026-07-21 pickup list below is
@@ -424,10 +484,13 @@ Keeping them separate is what stops the tool from confidently reporting good con
    resolved in favor of an AI company-diff pass over the `company.id` two-pass (§4, 2026-07-23 update).
 8. ~~Output sheet + summary.~~ **Done.** The summary line prints, and `writeResults()` writes the
    annotated sheet to `data/output/` (§3).
-9. Run the remaining tabs (`Zoe`, `Kylie`), then trim to `ACTIVE` → `verified.xlsx`. Phase 1 done.
+9. ~~Run the remaining tabs (`Zoe`, `Kylie`)~~ **Done 2026-07-27** (all three tabs — see the status
+   note above). Remaining: review the `NAME_MISMATCH` queue, then trim to `ACTIVE` →
+   `verified.xlsx`. Phase 1 done.
 
-**Phase 2, later:** `enrich.ts` reads `verified.xlsx`, enriches by `personId`, writes title / email /
-phone.
+**Phase 2, next (target 2026-07-28):** `enrich.ts` reads each verified row, pulls current
+**phone / email / job title** from ZoomInfo by `personId` (an exact lookup, no re-matching), and
+updates the sheet. Built ahead of need so EchoStor can run it whenever they choose.
 
 ---
 
@@ -435,7 +498,8 @@ phone.
 
 The tool outlives the internship, so `README.md` is a real deliverable, not an afterthought:
 
-- What it does and what the three statuses mean
+- What it does and what the five statuses mean (`ACTIVE` / `INACTIVE` / `NAME_MISMATCH` /
+  `NOT_FOUND` / `ERROR`), including that `NAME_MISMATCH` is a human-review queue, not a verdict
 - How to get ZoomInfo credentials and what goes in `.env`
 - How to run each phase
 - **What to do when the column names in a future spreadsheet don't match** — the most likely reason
