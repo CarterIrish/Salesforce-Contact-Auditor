@@ -95,22 +95,23 @@ const readContacts = async (filePath: string, worksheetName: string): Promise<Co
 }
 
 /**
- * Writes the output-column header labels into row 1, cells V–AA. Called by writeResults() before
+ * Writes the output-column header labels into row 1, cells V–AB. Called by writeResults() before
  * the data rows.
  * @param worksheet The worksheet to write the headers into.
  */
 const setHeaders = (worksheet: ExcelJS.Worksheet): void => {
     const headerRow = worksheet.getRow(1);
-    headerRow.getCell('V').value = 'Contact Status';
+    headerRow.getCell('V').value = 'Inferred Contact Status';
     headerRow.getCell('W').value = 'ZoomInfo Person ID';
     headerRow.getCell('X').value = 'ZoomInfo Company Name';
     headerRow.getCell('Y').value = 'ZoomInfo Company ID';
     headerRow.getCell('Z').value = 'ZoomInfo Title';
-    headerRow.getCell('AA').value = 'Notes';
+    headerRow.getCell('AA').value = 'Tool Notes';
+    headerRow.getCell('AB').value = 'ZoomInfo Rejected Candidates';
 }
 
 /**
- * Writes derived results into columns V–AA, keyed by each result's rowNumber. Re-opens the input
+ * Writes derived results into columns V–AB, keyed by each result's rowNumber. Re-opens the input
  * workbook, writes the results into it (leaving columns A–U and the other tabs intact), and saves to
  * a separate output file. Overwrites any existing output file.
  * @param inputPath Path to the input Excel file (read-only).
@@ -133,6 +134,7 @@ const writeResults = async (inputPath: string, outputPath: string, results: Sear
         row.getCell('Y').value = result.zi_company_id?.toString() ?? '';
         row.getCell('Z').value = result.zi_title ?? '';
         row.getCell('AA').value = result.notes ?? '';
+        row.getCell('AB').value = result.rejectedCandidates ?? '';
     }
     await worksheet.workbook.xlsx.writeFile(outputPath);
 }

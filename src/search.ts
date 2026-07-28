@@ -27,15 +27,17 @@ export const runSearch = async (inputFile: string, worksheetName: string): Promi
   let errorCount = 0;
   let activeCount = 0;
   let inactiveCount = 0;
+  let nameMismatchCount = 0;
   let notFoundCount = 0;
   for (const result of allResults) {
     if (result.status === 'ERROR') errorCount++;
     else if (result.status === 'ACTIVE') activeCount++;
     else if (result.status === 'INACTIVE') inactiveCount++;
+    else if (result.status === 'NAME_MISMATCH') nameMismatchCount++;
     else if (result.status === 'NOT_FOUND') notFoundCount++;
   }
 
-  console.log(`Summary: ${activeCount} active, ${inactiveCount} inactive, ${notFoundCount} not found, ${errorCount} errors`);
+  console.log(`Summary: ${activeCount} active, ${inactiveCount} inactive, ${nameMismatchCount} name mismatch, ${notFoundCount} not found, ${errorCount} errors`);
 
   // Per-tab output filename so runs against different tabs don't overwrite each other.
   await writeResults(inputFile, `data/output/annotated_${worksheetName}.xlsx`, allResults, worksheetName);
@@ -43,12 +45,13 @@ export const runSearch = async (inputFile: string, worksheetName: string): Promi
 
 export interface SearchResult {
   rowNumber: number;
-  status: 'ACTIVE' | 'INACTIVE' | 'NOT_FOUND' | 'ERROR';
+  status: 'ACTIVE' | 'INACTIVE' | 'NAME_MISMATCH' | 'NOT_FOUND' | 'ERROR';
   personId?: string;
   zi_company?: string;
   zi_company_id?: number;
   zi_title?: string;
   notes?: string;
+  rejectedCandidates?: string;
 }
 
 /**
@@ -65,9 +68,42 @@ const normalizeCompanyName = (name: string) =>
     .trim();
 
 /**
+ * Case-insensitive, whitespace-trimmed name equality used for match verification.
+ */
+const namesEqual = (a: string | undefined, b: string | undefined): boolean =>
+  (a ?? '').toLocaleLowerCase().trim() === (b ?? '').toLocaleLowerCase().trim();
+
+/**
+ * Returns the first ZoomInfo candidate whose first AND last name equal the sheet row's, or
+ * undefined when none passes. Identity is verified here because phase 2 enriches by personId —
+ * a wrong-person match would overwrite the contact's real info in Salesforce.
+ * @param response Raw ZoomInfo contact search response.
+ * @param contact The sheet row the candidates must match.
+ */
+const selectMatch = (response: any, contact: ContactRow) =>
+  (response.data ?? []).find((candidate: any) =>
+    namesEqual(candidate.attributes?.firstName, contact.firstName) &&
+    namesEqual(candidate.attributes?.lastName, contact.lastname));
+
+/**
+ * Formats candidates as "First Last (Company)", capped at 5, so rejected candidates can be
+ * eyeballed against the sheet row's own name during NAME_MISMATCH review.
+ * @param candidates Raw ZoomInfo candidate objects.
+ */
+const describeCandidates = (candidates: any[]): string => {
+  const names = candidates.slice(0, 5).map((candidate: any) =>
+    `${candidate.attributes?.firstName ?? ''} ${candidate.attributes?.lastName ?? ''} (${candidate.attributes?.company?.name ?? 'no company'})`.trim());
+  const more = candidates.length > 5 ? `; +${candidates.length - 5} more` : '';
+  return names.join('; ') + more;
+};
+
+/**
  * Resolves one contact's status against ZoomInfo: returns a cached result if present, otherwise
- * searches by name + company, falls back to an email-only search when that finds nothing, and
- * derives ACTIVE / INACTIVE / NOT_FOUND. Never throws — failures are returned as an ERROR result.
+ * searches by name + company, falls back to an email-only search when no candidate passed the
+ * name check, and derives the status. A candidate only counts as a match when its first and last
+ * name equal the sheet row's (selectMatch): an accepted match is ACTIVE / INACTIVE by company
+ * compare, rejected-only candidates are NAME_MISMATCH (best candidate's details kept for review),
+ * and zero candidates is NOT_FOUND. Never throws — failures are returned as an ERROR result.
  * @param contact The contact row to resolve.
  * @returns The SearchResult for this contact.
  */
@@ -87,20 +123,46 @@ const processContact = async (contact: ContactRow): Promise<SearchResult> => {
       lastName: contact.lastname,
       companyName: contact.company
     });
+    let contactMatch = selectMatch(response, contact);
+    let rejected: any[] = contactMatch ? [] : (response.data ?? []);
 
-    // If no results, fall back to searching by email
-    if (response.meta.totalResults === 0 && contact.email) {
+    // Fall back to email when nothing was accepted — not just when nothing was returned —
+    // so a rejected wrong-person hit still gets the email attempt.
+    if (!contactMatch && contact.email) {
       response = await contactSearch({ emailAddress: contact.email });
+      contactMatch = selectMatch(response, contact);
+      if (!contactMatch) {
+        // A candidate can come back from both searches — don't list it twice.
+        rejected = rejected.concat((response.data ?? []).filter((c: any) => !rejected.some(r => r.id === c.id)));
+      }
     }
 
-    // Derive status from the response
-    if (response.meta.totalResults === 0) {
-      cache.setCached(cacheKey, { rowNumber: contact.rowNumber, status: 'NOT_FOUND' });
-      return { rowNumber: contact.rowNumber, status: 'NOT_FOUND' };
+    // Nothing returned at all: truly not found.
+    if (!contactMatch && rejected.length === 0) {
+      const result: SearchResult = { rowNumber: contact.rowNumber, status: 'NOT_FOUND' };
+      cache.setCached(cacheKey, result);
+      return result;
     }
 
-    const contactMatch = response.data[0];
-    const notes = response.meta.totalResults > 1 ? `${response.meta.totalResults} matches found, using the most relevant one.` : undefined;
+    // Candidates returned but none passed the name check: surface the best candidate's details
+    // for manual review. The row only reaches stage 2 if a human flips it to ACTIVE.
+    if (!contactMatch) {
+      const best = rejected[0];
+      const result: SearchResult = {
+        rowNumber: contact.rowNumber,
+        status: 'NAME_MISMATCH',
+        personId: best.id,
+        zi_company: best.attributes?.company?.name,
+        zi_company_id: best.attributes?.company?.id,
+        zi_title: best.attributes?.jobTitle,
+        notes: `${rejected.length} candidate(s) rejected: name mismatch.`,
+        rejectedCandidates: describeCandidates(rejected)
+      };
+      cache.setCached(cacheKey, result);
+      return result;
+    }
+
+    const notes = response.meta.totalResults > 1 ? `${response.meta.totalResults} matches found; used the first name-verified one.` : undefined;
     const isActive = normalizeCompanyName(contactMatch.attributes.company.name) === normalizeCompanyName(contact.company);
 
     // Build the SearchResult object and cache it
