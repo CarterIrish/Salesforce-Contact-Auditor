@@ -161,7 +161,7 @@ one assumption that could have silently invalidated the design. It holds.
 ### Deriving status
 
 **The acceptance rule (added 2026-07-27, `selectMatch` in `search.ts`):** ZoomInfo's search is fuzzy
-— it *proposes* candidates, it does not confirm identity. A candidate is **accepted** only when its
+— it _proposes_ candidates, it does not confirm identity. A candidate is **accepted** only when its
 first name AND last name equal the sheet row's (case-insensitive, whitespace-trimmed, otherwise
 character-exact). The check scans every returned candidate in order and applies identically to both
 search paths (name+company and the email fallback). Rationale: phase 2 enriches by `personId` and
@@ -171,13 +171,13 @@ the tool fails toward the cheap error. Nicknames (`Mike` vs `Michael`), initials
 variants are deliberately rejected — they land in `NAME_MISMATCH` for a human to confirm, not in the
 verified set. (Fuzzy/edit-distance matching was measured and rejected — see §6, 2026-07-27.)
 
-| Condition                                        | Status                                                              |
-| ------------------------------------------------ | ------------------------------------------------------------------- |
-| No candidate returned by either search           | `NOT_FOUND` — ZoomInfo has nothing for any field we hold            |
-| Candidates returned, none accepted               | `NAME_MISMATCH` — somebody close came back, identity unverified; best candidate's details kept for review |
-| Accepted match, normalized `company` **==** input | `ACTIVE` (compare is normalized — see §4)                           |
-| Accepted match, normalized `company` **!=** input | `INACTIVE` — matched on past employment; they've moved on           |
-| `totalResults > 1`                               | First *accepted* candidate wins (API default sort, `-relevance`); flagged in `Tool Notes` |
+| Condition                                         | Status                                                                                                    |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| No candidate returned by either search            | `NOT_FOUND` — ZoomInfo has nothing for any field we hold                                                  |
+| Candidates returned, none accepted                | `NAME_MISMATCH` — somebody close came back, identity unverified; best candidate's details kept for review |
+| Accepted match, normalized `company` **==** input | `ACTIVE` (compare is normalized — see §4)                                                                 |
+| Accepted match, normalized `company` **!=** input | `INACTIVE` — matched on past employment; they've moved on                                                 |
+| `totalResults > 1`                                | First _accepted_ candidate wins (API default sort, `-relevance`); flagged in `Tool Notes`                 |
 
 > **Not sorting by `contactAccuracyScore`** (decided 2026-07-21): the score measures ZoomInfo's
 > confidence in a single profile's own data quality (employment + email currency), not whether that
@@ -228,15 +228,15 @@ email-only has been tried against the real run and judged insufficient.
 
 Existing columns (A–U) untouched, per the input schema note above. New columns append starting at `V`:
 
-| Column (header)                | Col | Source            | Notes                                                                                        |
-| ------------------------------ | --- | ----------------- | -------------------------------------------------------------------------------------------- |
-| `Inferred Contact Status`      | V   | derived           | `ACTIVE` / `INACTIVE` / `NAME_MISMATCH` / `NOT_FOUND` / `ERROR`                              |
-| `ZoomInfo Person ID`           | W   | candidate `id`    | **Phase 2's key.** Write as **text** — `"14062844524"` as a number renders as `1.40628E+10`. |
-| `ZoomInfo Company Name`        | X   | `company.name`    | Lets a human sanity-check every `INACTIVE`                                                   |
-| `ZoomInfo Company ID`          | Y   | `company.id`      | Ground-truth company match; feeds the AI INACTIVE review (§4). Written as **text** — see below. |
-| `ZoomInfo Title`               | Z   | `jobTitle`        | Free in search. Part of phase 2, already paid for.                                          |
-| `Tool Notes`                   | AA  | derived           | Multi-match note, rejected-candidate count, or the error message when `status` is `ERROR`.  |
-| `ZoomInfo Rejected Candidates` | AB  | derived           | `NAME_MISMATCH` only: up to 5 rejected candidates as `First Last (Company)` for eyeball review. |
+| Column (header)                | Col | Source         | Notes                                                                                           |
+| ------------------------------ | --- | -------------- | ----------------------------------------------------------------------------------------------- |
+| `Inferred Contact Status`      | V   | derived        | `ACTIVE` / `INACTIVE` / `NAME_MISMATCH` / `NOT_FOUND` / `ERROR`                                 |
+| `ZoomInfo Person ID`           | W   | candidate `id` | **Phase 2's key.** Write as **text** — `"14062844524"` as a number renders as `1.40628E+10`.    |
+| `ZoomInfo Company Name`        | X   | `company.name` | Lets a human sanity-check every `INACTIVE`                                                      |
+| `ZoomInfo Company ID`          | Y   | `company.id`   | Ground-truth company match; feeds the AI INACTIVE review (§4). Written as **text** — see below. |
+| `ZoomInfo Title`               | Z   | `jobTitle`     | Free in search. Part of phase 2, already paid for.                                              |
+| `Tool Notes`                   | AA  | derived        | Multi-match note, rejected-candidate count, or the error message when `status` is `ERROR`.      |
+| `ZoomInfo Rejected Candidates` | AB  | derived        | `NAME_MISMATCH` only: up to 5 rejected candidates as `First Last (Company)` for eyeball review. |
 
 On `NAME_MISMATCH` rows, W–Z are populated from the **best (first-returned) rejected candidate** —
 deliberately, so a human who confirms the match has the `personId` in hand with no re-search. That
@@ -318,6 +318,7 @@ you iterate on the output format freely.
 
 > **Built (2026-07-23)** in `cache.ts` (`loadCache` / `getCached` / `setCached` / `saveCache` /
 > `buildCacheKey`), a JSON file at `data/cache/cache.store`. Two subtleties the full run surfaced:
+>
 > - **`rowNumber` must not be reused from the cache.** The cached value is a whole `SearchResult`
 >   including `rowNumber`, but `rowNumber` is per-row while the key is per-(name+company). On a hit,
 >   `processContact` re-stamps it from the current contact (`{ ...cached, rowNumber: contact.rowNumber }`);
@@ -344,6 +345,7 @@ Keeping them separate is what stops the tool from confidently reporting good con
 > **Status (2026-07-27, end of day). Stage 1 audit complete on all three tabs.** The day began with
 > a deliberate **restart**: the 07-24 → 07-27 branch work had over-complicated the tool, so it was
 > reset to `aa33e99` (the 2026-07-23 state) and rebuilt lean. What landed, in order:
+>
 > - **`--worksheet` / `-w` flag** — threads through both `readExcelSheet` callers, drives the
 >   per-tab output filename `annotated_<tab>.xlsx`, and a missing tab errors with the workbook's
 >   real worksheet names.
@@ -359,14 +361,15 @@ Keeping them separate is what stops the tool from confidently reporting good con
 > - Output headers V/AA renamed to `Inferred Contact Status` / `Tool Notes` (duplicate-header
 >   collision with Salesforce's L/U columns).
 >
-> Full runs, 0 errors each: `Carter` 433 ACTIVE / 734 INACTIVE / 301 NAME_MISMATCH / 1,417 NOT_FOUND ·
+> Full runs, 0 errors each: `Carter` 433 ACTIVE / 734 INACTIVE / 301 NAME*MISMATCH / 1,417 NOT_FOUND ·
 > `Zoe` 511 / 635 / 352 / 1,392 · `Kylie` 505 / 721 / 320 / 1,334 — totals **1,449 / 2,090 / 973 /
 > 4,143** over 8,655 rows, a 40.9% programmatic hit rate with an 11.2% human-review queue. The three
 > annotated tabs were combined (manually, Move-or-Copy) into **`data/output/AnnotatedContacts.xlsx`**
 > — per-tab status counts verified identical to the per-tab outputs; that file is now the working
-> copy, the three `annotated_*.xlsx` are archives.
+> copy, the three `annotated*\*.xlsx` are archives.
 >
 > **Tomorrow (2026-07-28):**
+>
 > 1. Review the 973 `NAME_MISMATCH` rows in `AnnotatedContacts.xlsx` (filter column V per tab,
 >    compare AB against the row's First/Last, flip confirmed rows in **V** — not Salesforce's L),
 >    then send the completed stage-1 sheet to **Alex**.
@@ -383,7 +386,7 @@ Keeping them separate is what stops the tool from confidently reporting good con
 > (`getRows(2, rowCount - 1)`). `cache.ts` built (§5), including the `rowNumber` re-stamp fix.
 > (`package.json` is still at **0.2.0** — bump to **0.3.0** with this milestone's commit.)
 >
-> **Read NOT_FOUND with care:** ~half the list. It asserts only that name+company *and* the email
+> **Read NOT_FOUND with care:** ~half the list. It asserts only that name+company _and_ the email
 > fallback both came back empty — not that the person is truly gone. Rows with no email only ever got
 > one shot, and phone (a candidate third fallback, §3) isn't built. Treat 1,429 as an upper bound and
 > route it to manual/LinkedIn review, not as a confirmed count.
@@ -395,6 +398,7 @@ Keeping them separate is what stops the tool from confidently reporting good con
 > **Next — finish the search branch (implementing 2026-07-24 onward).** The driving goal is a clean
 > handoff to **EchoStor** at internship end, so the next dev can follow the intent and build on it —
 > favor legibility over cleverness. Behavior gets decided at the CLI, so it's chosen at call time:
+>
 > - **`--worksheet <name>` flag.** Replaces the hardcoded `'Carter'` in `readExcelSheet`, threaded
 >   through both callers (`readContacts` + `writeResults`) so read and write always hit the same tab.
 >   Also the source for the output filename (e.g. `annotated_<worksheet>.xlsx`), so tabs never clobber
@@ -417,13 +421,14 @@ Keeping them separate is what stops the tool from confidently reporting good con
 > the sheet, searches every contact (name+company, then the email fallback), derives status, and
 > prints per-row results plus a summary tally (`X active, Y inactive, Z not found, N errors`). Every
 > error class hit during today's first bulk runs is closed:
+>
 > - **Auth cold-start stampede (401s).** The 25 concurrent first-chunk calls each saw an empty token
 >   cache and fired their own token fetch; ZoomInfo invalidates all but the last, so the whole first
 >   chunk 401'd. Fixed in `auth.ts` with an in-flight-promise guard (`pendingFetch`) so concurrent
 >   callers share a single fetch; it also now uses the real `expires_in` and clears the guard via
 >   `.finally()` so a failed fetch can't permanently poison auth.
 > - **`email` field 400s.** The fallback sent an `email` attribute, but the endpoint only accepts
->   `emailAddress` (`400 PFAPI0005`) — meaning *every* fallback had been silently failing. Fixed.
+>   `emailAddress` (`400 PFAPI0005`) — meaning _every_ fallback had been silently failing. Fixed.
 > - **429 rate-limit.** Chunk-level pacing undercounted fallbacks and burst via `Promise.all`.
 >   Replaced with a request-level throttle at 20 req/s in `zoominfo.ts`; 429s went to zero. See §2.
 > - **False `INACTIVE`s from company-name mismatch.** `normalizeCompanyName` added; residual
@@ -433,9 +438,10 @@ Keeping them separate is what stops the tool from confidently reporting good con
 > 2,880-row run yet.
 >
 > **Pick up here tomorrow, in order:**
+>
 > 1. **Build `writeResults()` in `excel.ts`** — the last piece before there's an actual output file
 >    (tomorrow's headline goal). Writes derived columns V–AA keyed by `rowNumber`, leaves A–U
->    untouched, writes `personId` as **text**, and saves to a *new* file under `data/output/` — never
+>    untouched, writes `personId` as **text**, and saves to a _new_ file under `data/output/` — never
 >    overwrite the input. Then wire the `writeResults(...)` call into `search.ts` (the TODO at the end
 >    of `runSearch`).
 > 2. **Fix the `[object Object]` email bug in `excel.ts`.** Hyperlinked email cells come back from
