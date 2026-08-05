@@ -1,5 +1,4 @@
 import 'dotenv/config';
-import chalk from 'chalk';
 import { parseArgs } from 'node:util';
 import { existsSync } from 'node:fs';
 import { runSearch } from './search';
@@ -63,7 +62,7 @@ const main = async () => {
 }
 
 main().catch((err) => {
-  console.error(err instanceof Error ? chalk.red(err.message) : err);
+  console.error(err instanceof Error ? err.message : err);
   console.log(USAGE);
   process.exit(1);
 });
