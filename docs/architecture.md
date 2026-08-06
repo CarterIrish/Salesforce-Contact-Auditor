@@ -48,8 +48,7 @@ salesforce-contact-auditor/
 
 ### Code flow
 
-Exported renders live at `docs/Architecture_Diagram.svg` / `.png`; this block is the editable
-source (GitHub renders it inline).
+Exported renders live at `docs/Architecture_Diagram.svg` / `.png`
 
 ```mermaid
 flowchart TB
