@@ -29,7 +29,7 @@ salesforce-contact-auditor/
 ├── src/
 │   ├── cli.ts         # The only entry point.  npm run dev -- search data/input/contacts.xlsx
 │   ├── search.ts      # Phase 1 workflow — runSearch(inputFile), dispatched by cli.ts
-│   ├── enrich.ts      # Phase 2 workflow — NOT YET CREATED; cli.ts throws on the subcommand.
+│   ├── enrich.ts      # Phase 2 workflow — NOT COMPLETED YET; cli.ts throws on the subcommand.
 │   ├── auth.ts        # getBearerToken() — the token seam. See §6 step 3.
 │   ├── zoominfo.ts    # contactSearch() + request-level throttle. contactEnrich() later.
 │   ├── excel.ts       # readContacts() + writeResults() — both built
