@@ -29,7 +29,7 @@ salesforce-contact-auditor/
 ├── src/
 │   ├── cli.ts         # The only entry point.  npm run dev -- search data/input/contacts.xlsx
 │   ├── search.ts      # Phase 1 workflow — runSearch(inputFile), dispatched by cli.ts
-│   ├── enrich.ts      # Phase 2 workflow — later. Until built, the subcommand throws.
+│   ├── enrich.ts      # Phase 2 workflow — NOT YET CREATED; cli.ts throws on the subcommand.
 │   ├── auth.ts        # getBearerToken() — the token seam. See §6 step 3.
 │   ├── zoominfo.ts    # contactSearch() + request-level throttle. contactEnrich() later.
 │   ├── excel.ts       # readContacts() + writeResults() — both built
@@ -42,14 +42,63 @@ salesforce-contact-auditor/
 ├── .env               # CLIENT_ID / CLIENT_SECRET — Client Credentials Flow, exchanged for a
 │                      # short-lived bearer token by auth.ts and cached in memory until near expiry
 ├── .env.example       # Committed. No real values.
+├── names.csv          # Nickname → formal-name lookup for a future nickname rule. Unused by src/.
 └── README.md          # The handoff artifact — see §7.
 ```
 
-**Runtime dependencies:** `exceljs`, `dotenv`, `chalk`. Native `fetch`.
+### Code flow
+
+Exported renders live at `docs/Architecture_Diagram.svg` / `.png`; this block is the editable
+source (GitHub renders it inline).
+
+```mermaid
+flowchart TB
+    subgraph P1["PHASE 1: SEARCH (built)"]
+        CLI["cli.ts search --worksheet Carter"] --> READ["excel.ts readContacts"]
+        READ --> PROC["search.ts processContact<br/>one per row"]
+        PROC --> CACHE{"cache.ts getCached"}
+        CACHE -- hit --> WRITE
+        CACHE -- miss --> SEARCH["zoominfo.ts contactSearch<br/>firstName + lastName + companyName<br/>companyPastOrPresent"]
+        SEARCH --> SEL1{"selectMatch<br/>exact first AND last name"}
+        SEL1 -- accepted --> COMP{"normalizeCompanyName<br/>company match?"}
+        SEL1 -- none accepted --> FB["contactSearch<br/>emailAddress only"]
+        FB --> SEL2{"selectMatch"}
+        SEL2 -- accepted --> COMP
+        SEL2 -- "candidates, none accepted" --> NM["NAME_MISMATCH<br/>candidates to col AB"]
+        SEL2 -- zero candidates --> NF["NOT_FOUND"]
+        COMP -- yes --> ACT["ACTIVE"]
+        COMP -- no --> INA["INACTIVE"]
+        ACT --> WRITE["cache.setCached<br/>excel.ts writeResults<br/>cols V to AB"]
+        INA --> WRITE
+        NM --> WRITE
+        NF --> WRITE
+    end
+    subgraph BP["BETWEEN PHASES: not code"]
+        ANNOT["annotated_TAB.xlsx"]
+        ANNOT --> AID["AI diff company names<br/>on INACTIVE rows"] --> HV["human verify<br/>AI decisions"]
+        ANNOT --> ML["manual review, offloaded<br/>NAME_MISMATCH + NOT_FOUND"]
+        HV --> FILT["filter to ACTIVE"]
+        ML -. any recovered .-> FILT
+        FILT --> VER["verified.xlsx"]
+    end
+    WRITE --> ANNOT
+    subgraph P2["PHASE 2: ENRICH (to build)"]
+        ECLI["cli.ts enrich"] --> ENR["enrich.ts<br/>per verified row"] --> CE["zoominfo.ts contactEnrich<br/>by personId, exact lookup"] --> OUT2["current phone + email<br/>refreshed job title"] --> ES["enriched contact sheet"]
+    end
+    VER --> ECLI
+    AUTH["auth.ts getBearerToken<br/>client credentials, cached ~1hr"]
+    SEARCH -.-> AUTH
+    FB -.-> AUTH
+    CE -.-> AUTH
+```
+
+**Runtime dependencies:** `exceljs`, `dotenv`. Native `fetch`. (`chalk` was dropped — plain
+console output is enough for a single-operator CLI.)
 **Toolchain:** TypeScript strict; `tsx` runs the dev loop (`npm run dev -- <command> <file>`), `tsc`
 builds to `dist/` (`npm start`). CommonJS package (ESM `import` syntax, compiled to `require`) with
-`nodenext` module resolution — required because chalk 5 is ESM-only and Node ≥ 22 can `require()` it
-natively; `node16` resolution rejects that.
+`nodenext` module resolution. (The original reason for `nodenext` — chalk 5 being ESM-only, which
+`node16` resolution can't `require()` — left with chalk; the setting stays because it's current and
+harmless.)
 
 No test framework, no CLI framework (arg parsing is `parseArgs` from `node:util`), no validation
 library, no rate-limit library. **Rate limiting** is a hand-rolled request-level throttle in
@@ -169,7 +218,9 @@ search paths (name+company and the email fallback). Rationale: phase 2 enriches 
 real contact's data. A false `NOT_FOUND` costs a manual lookup; a false `ACTIVE` corrupts a record;
 the tool fails toward the cheap error. Nicknames (`Mike` vs `Michael`), initials, and punctuation
 variants are deliberately rejected — they land in `NAME_MISMATCH` for a human to confirm, not in the
-verified set. (Fuzzy/edit-distance matching was measured and rejected — see §6, 2026-07-27.)
+verified set. (Fuzzy/edit-distance matching was measured and rejected — see §6, 2026-07-27.) A
+nickname→formal-name lookup (`names.csv`, repo root) is committed for a future nickname-matching
+rule; nothing in `src/` reads it yet.
 
 | Condition                                         | Status                                                                                                    |
 | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
@@ -368,16 +419,18 @@ Keeping them separate is what stops the tool from confidently reporting good con
 > — per-tab status counts verified identical to the per-tab outputs; that file is now the working
 > copy, the three `annotated*\*.xlsx` are archives.
 >
-> **Tomorrow (2026-07-28):**
+> **Remaining work (updated 2026-08-05):**
 >
-> 1. Review the 973 `NAME_MISMATCH` rows in `AnnotatedContacts.xlsx` (filter column V per tab,
->    compare AB against the row's First/Last, flip confirmed rows in **V** — not Salesforce's L),
->    then send the completed stage-1 sheet to **Alex**.
+> 1. ~~Review the 973 `NAME_MISMATCH` rows~~ **Offloaded (2026-08-05):** the `NAME_MISMATCH`
+>    review goes to other reviewers, folded into the same manual-review bucket as `NOT_FOUND` —
+>    but the rows keep their own status in column V so they stay identifiable. The review
+>    mechanics are unchanged for whoever does it: compare AB against the row's First/Last, flip
+>    confirmed rows in **V** (not Salesforce's L).
 > 2. **Write the phase 2 enrichment flow** (`enrich.ts` + a working `enrich` subcommand): read each
 >    row and, for verified contacts, pull current **phone + email + job title** from ZoomInfo by
 >    `personId` and update the sheet — built now so it's ready whenever EchoStor wants to run it.
-> 3. Still open behind those: `README.md` (§7), version bump 0.2.0 → 0.3.0, **commit + push**
->    (today's work is uncommitted and `aa33e99` was never pushed).
+> 3. Version bump 0.2.0 → 0.3.0 with the next milestone commit. (`README.md` was written 2026-08-05
+>    — see §7 — and everything through the chalk removal is committed and pushed.)
 
 > **Status (2026-07-23).** First full run done — all 2,885 `Carter` rows tagged, **0 errors**:
 > **545 ACTIVE, 911 INACTIVE, 1,429 NOT_FOUND**. Everything on the 2026-07-21 pickup list below is
@@ -510,3 +563,9 @@ The tool outlives the internship, so `README.md` is a real deliverable, not an a
 - How to run each phase
 - **What to do when the column names in a future spreadsheet don't match** — the most likely reason
   it breaks for the next person
+
+> **Written (2026-08-05).** `README.md` now covers all four points: a status table with a
+> per-bucket "who resolves it" column, credential setup, run instructions, and a troubleshooting
+> table led by the missing-column case (the four required headers are matched by name — any casing,
+> any position). Keep the README current whenever a flag, column, or status changes — it, not this
+> file, is what the next operator reads first.
