@@ -1,7 +1,7 @@
 // Phase 1: read the contact sheet, check each row against ZoomInfo Contact Search,
 // derive ACTIVE / INACTIVE / NOT_FOUND, write the annotated sheet.
 import { ContactRow, readContacts, writeSearchResults } from './excel';
-import { contactSearch } from './zoominfo';
+import { contactSearch, ContactSearchResponse, ContactSearchCandidate} from './zoominfo';
 import * as cache from './cache';
 
 const CACHE_FILE_PATH = 'data/cache/cache.store';
@@ -75,24 +75,24 @@ const namesEqual = (a: string | undefined, b: string | undefined): boolean =>
 
 /**
  * Returns the first ZoomInfo candidate whose first AND last name equal the sheet row's, or
- * undefined when none passes. Identity is verified here because phase 2 enriches by personId —
+ * undefined when none passes. Identity is verified here because phase 2 enriches by personId -
  * a wrong-person match would overwrite the contact's real info in Salesforce.
  * @param response Raw ZoomInfo contact search response.
  * @param contact The sheet row the candidates must match.
  */
-const selectMatch = (response: any, contact: ContactRow) =>
-  (response.data ?? []).find((candidate: any) =>
-    namesEqual(candidate.attributes?.firstName, contact.firstName) &&
-    namesEqual(candidate.attributes?.lastName, contact.lastname));
+const selectMatch = (response: ContactSearchResponse, contact: ContactRow) =>
+  response.data.find((candidate: ContactSearchCandidate) =>
+    namesEqual(candidate.attributes.firstName, contact.firstName) &&
+    namesEqual(candidate.attributes.lastName, contact.lastname));
 
 /**
  * Formats candidates as "First Last (Company)", capped at 5, so rejected candidates can be
  * eyeballed against the sheet row's own name during NAME_MISMATCH review.
  * @param candidates Raw ZoomInfo candidate objects.
  */
-const describeCandidates = (candidates: any[]): string => {
-  const names = candidates.slice(0, 5).map((candidate: any) =>
-    `${candidate.attributes?.firstName ?? ''} ${candidate.attributes?.lastName ?? ''} (${candidate.attributes?.company?.name ?? 'no company'})`.trim());
+const describeCandidates = (candidates: ContactSearchCandidate[]): string => {
+  const names = candidates.slice(0, 5).map((candidate: ContactSearchCandidate) =>
+    `${candidate.attributes.firstName ?? ''} ${candidate.attributes.lastName ?? ''} (${candidate.attributes.company.name})`.trim());
   const more = candidates.length > 5 ? `; +${candidates.length - 5} more` : '';
   return names.join('; ') + more;
 };
@@ -103,14 +103,14 @@ const describeCandidates = (candidates: any[]): string => {
  * name check, and derives the status. A candidate only counts as a match when its first and last
  * name equal the sheet row's (selectMatch): an accepted match is ACTIVE / INACTIVE by company
  * compare, rejected-only candidates are NAME_MISMATCH (best candidate's details kept for review),
- * and zero candidates is NOT_FOUND. Never throws — failures are returned as an ERROR result.
+ * and zero candidates is NOT_FOUND. Never throws - failures are returned as an ERROR result.
  * @param contact The contact row to resolve.
  * @returns The SearchResult for this contact.
  */
 const processContact = async (contact: ContactRow): Promise<SearchResult> => {
   try {
     // Cache is keyed by name+company only. A hit reuses ZoomInfo's answer but must be re-stamped
-    // with THIS contact's rowNumber — the cached rowNumber belongs to whichever row first populated
+    // with THIS contact's rowNumber - the cached rowNumber belongs to whichever row first populated
     // the key, and reusing it would misplace (or blank) duplicate-name rows on write. See §5.
     let cacheKey = cache.buildCacheKey(contact.firstName, contact.lastname, contact.company);
     let cachedContact = cache.getCached(cacheKey);
@@ -124,16 +124,16 @@ const processContact = async (contact: ContactRow): Promise<SearchResult> => {
       companyName: contact.company
     });
     let contactMatch = selectMatch(response, contact);
-    let rejected: any[] = contactMatch ? [] : (response.data ?? []);
+    let rejected: ContactSearchCandidate[] = contactMatch ? [] : response.data;
 
-    // Fall back to email when nothing was accepted — not just when nothing was returned —
+    // Fall back to email when nothing was accepted - not just when nothing was returned -
     // so a rejected wrong-person hit still gets the email attempt.
     if (!contactMatch && contact.email) {
       response = await contactSearch({ emailAddress: contact.email });
       contactMatch = selectMatch(response, contact);
       if (!contactMatch) {
-        // A candidate can come back from both searches — don't list it twice.
-        rejected = rejected.concat((response.data ?? []).filter((c: any) => !rejected.some(r => r.id === c.id)));
+        // A candidate can come back from both searches - don't list it twice.
+        rejected = rejected.concat(response.data.filter((c: ContactSearchCandidate) => !rejected.some(r => r.id === c.id)));
       }
     }
 
@@ -152,9 +152,9 @@ const processContact = async (contact: ContactRow): Promise<SearchResult> => {
         rowNumber: contact.rowNumber,
         status: 'NAME_MISMATCH',
         personId: best.id,
-        zi_company: best.attributes?.company?.name,
-        zi_company_id: best.attributes?.company?.id,
-        zi_title: best.attributes?.jobTitle,
+        zi_company: best.attributes.company.name,
+        zi_company_id: best.attributes.company.id,
+        zi_title: best.attributes.jobTitle,
         notes: `${rejected.length} candidate(s) rejected: name mismatch.`,
         rejectedCandidates: describeCandidates(rejected)
       };

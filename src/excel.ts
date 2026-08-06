@@ -20,9 +20,7 @@ const REQUIRED_COLUMNS = ['first name', 'last name', 'account name', 'email'];
 const readExcelSheet = async (filePath: string, worksheetName: string): Promise<ExcelJS.Worksheet> => {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.readFile(filePath);
-    if (!workbook) {
-        throw new Error(`Failed to read Excel file: ${filePath}`);
-    }
+
     const worksheet = workbook.getWorksheet(worksheetName);
     if (!worksheet) {
         const available = workbook.worksheets.map(ws => ws.name).join(', ');
@@ -74,7 +72,7 @@ const readRows = async (worksheet: ExcelJS.Worksheet): Promise<ContactRow[]> => 
             firstName: row.getCell(headers.get('first name')!).value?.toString() ?? '',
             lastname: row.getCell(headers.get('last name')!).value?.toString() ?? '',
             company: row.getCell(headers.get('account name')!).value?.toString() ?? '',
-            email: row.getCell(headers.get('email')!).text ?? '',
+            email: row.getCell(headers.get('email')!).text,
         };
         contactRows.push(newRow);
     }
@@ -117,7 +115,7 @@ const setHeaders = (worksheet: ExcelJS.Worksheet): void => {
  * @param inputPath Path to the input Excel file (read-only).
  * @param outputPath Path to the output Excel file (written).
  * @param results Array of SearchResult objects, each with a rowNumber matching the input sheet.
- * @param worksheetName Name of the worksheet tab to write into — must match the tab that was read.
+ * @param worksheetName Name of the worksheet tab to write into - must match the tab that was read.
  * @throws Error if inputPath === outputPath, or the workbook cannot be read or written.
  */
 const writeSearchResults = async (inputPath: string, outputPath: string, results: SearchResult[], worksheetName: string): Promise<void> => {
