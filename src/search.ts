@@ -1,6 +1,6 @@
 // Phase 1: read the contact sheet, check each row against ZoomInfo Contact Search,
 // derive ACTIVE / INACTIVE / NOT_FOUND, write the annotated sheet.
-import { ContactRow, readContacts, writeResults } from './excel';
+import { ContactRow, readContacts, writeSearchResults } from './excel';
 import { contactSearch } from './zoominfo';
 import * as cache from './cache';
 
@@ -40,7 +40,7 @@ export const runSearch = async (inputFile: string, worksheetName: string): Promi
   console.log(`Summary: ${activeCount} active, ${inactiveCount} inactive, ${nameMismatchCount} name mismatch, ${notFoundCount} not found, ${errorCount} errors`);
 
   // Per-tab output filename so runs against different tabs don't overwrite each other.
-  await writeResults(inputFile, `data/output/annotated_${worksheetName}.xlsx`, allResults, worksheetName);
+  await writeSearchResults(inputFile, `data/output/annotated_${worksheetName}.xlsx`, allResults, worksheetName);
 };
 
 export interface SearchResult {

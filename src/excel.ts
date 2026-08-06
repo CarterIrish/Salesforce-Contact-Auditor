@@ -120,7 +120,7 @@ const setHeaders = (worksheet: ExcelJS.Worksheet): void => {
  * @param worksheetName Name of the worksheet tab to write into — must match the tab that was read.
  * @throws Error if inputPath === outputPath, or the workbook cannot be read or written.
  */
-const writeResults = async (inputPath: string, outputPath: string, results: SearchResult[], worksheetName: string): Promise<void> => {
+const writeSearchResults = async (inputPath: string, outputPath: string, results: SearchResult[], worksheetName: string): Promise<void> => {
     if (inputPath === outputPath) {
         throw new Error(`Input and output paths must be different: ${inputPath}`);
     }
@@ -139,4 +139,4 @@ const writeResults = async (inputPath: string, outputPath: string, results: Sear
     await worksheet.workbook.xlsx.writeFile(outputPath);
 }
 
-export { readContacts, writeResults };
+export { readContacts, writeSearchResults };
