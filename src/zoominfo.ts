@@ -45,15 +45,15 @@ export interface ContactEnrichAttributes {
 export type ContactEnrichMatchStatus =
     | 'FULL_MATCH'
     | 'NO_MATCH'
-    | 'NON_MATCH_BY_LAST_UPDATED_DATE'
-    | 'NON_MATCH_BY_VALID_DATE'
-    | 'NON_MATCH_BY_REQUIRED_FIELDS'
-    | 'NON_MATCH_BY_CONTACT_ACCURACY_MIN'
-    | 'COMPANY_ONLY_MATCH'
-    | 'CONTACT_ONLY_MATCH'
-    | 'OPT_OUT'
+    | 'LAST_UPDATE_NOT_MATCHED'
+    | 'VALID_DATE_NOT_MATCHED'
+    | 'REQUIRED_FIELDS_MISSING'
+    | 'CONTACT_ACCURACY_NOT_MATCHED'
+    | 'COMPANY_MATCH_ONLY'
+    | 'CONTACT_MATCH_ONLY'
+    | 'CONTACT_OPTED_OUT'
     | 'LIMIT_EXCEEDED'
-    | 'INVALID_INPUT';
+    | 'INPUT_ERROR';
 
 export interface ContactEnrichRecord {
     attributes: ContactEnrichAttributes;

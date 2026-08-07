@@ -4,7 +4,7 @@ import { ContactRow, readContacts, writeSearchResults } from './excel';
 import { contactSearch, ContactSearchResponse, ContactSearchCandidate} from './zoominfo';
 import * as cache from './cache';
 
-const CACHE_FILE_PATH = 'data/cache/search_cache.store';
+const SEARCH_CACHE_FILE_PATH = 'data/cache/search_cache.store';
 
 /**
  * Runs the phase 1 audit end to end: loads the cache, reads the contact sheet, searches every
@@ -13,7 +13,7 @@ const CACHE_FILE_PATH = 'data/cache/search_cache.store';
  * @param worksheetName Name of the worksheet tab to audit; also names the output file.
  */
 export const runSearch = async (inputFile: string, worksheetName: string): Promise<void> => {
-  cache.loadCache(CACHE_FILE_PATH);
+  cache.loadCache(SEARCH_CACHE_FILE_PATH);
 
   const contacts = await readContacts(inputFile, worksheetName);
   console.log(`Read ${contacts.length} contacts from ${inputFile}`);
@@ -21,7 +21,7 @@ export const runSearch = async (inputFile: string, worksheetName: string): Promi
   // Process each contact and collect results
   const allResults: SearchResult[] = await Promise.all(contacts.map(contact => processContact(contact)));
 
-  cache.saveCache(CACHE_FILE_PATH);
+  cache.saveCache(SEARCH_CACHE_FILE_PATH);
 
   // Build the summary of results
   let errorCount = 0;

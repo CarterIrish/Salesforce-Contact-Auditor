@@ -2,9 +2,10 @@ import 'dotenv/config';
 import { parseArgs } from 'node:util';
 import { existsSync } from 'node:fs';
 import { runSearch } from './search';
+import { runEnrich } from './enrich';
 
-const USAGE = 
-`
+const USAGE =
+  `
 Salesforce Contact Auditor
 
 Usage: npm run dev -- <command> <inputFile> [options]
@@ -31,30 +32,40 @@ const main = async () => {
   console.log(`Salesforce Contact Auditor | Version: ${process.env.npm_package_version}`);
   console.log(`Node.js Version: ${process.version}`);
   console.log('---------------------------------------- \n \n');
-  
+
   const args = process.argv.slice(2);
-  const {values, positionals} = parseArgs({ args, options: { help: { type: 'boolean', short: 'h' }, worksheet: { type: 'string', short: 'w' } }, allowPositionals: true });
-  if(values.help || positionals.length === 0) {
+  const { values, positionals } = parseArgs({ args, options: { help: { type: 'boolean', short: 'h' }, worksheet: { type: 'string', short: 'w' } }, allowPositionals: true });
+  if (values.help || positionals.length === 0) {
     console.log(USAGE);
     return;
   }
 
   const [command, inputFile] = positionals;
-  switch(command){
+  switch (command) {
     case 'search':
-      if(!inputFile) {
+      if (!inputFile) {
         throw new Error('Input file is required for the search command.');
       }
-      if(!existsSync(inputFile)) {
+      if (!existsSync(inputFile)) {
         throw new Error(`Input file "${inputFile}" does not exist.`);
       }
-      if(!values.worksheet) {
+      if (!values.worksheet) {
         throw new Error('The --worksheet option is required for the search command.');
       }
       await runSearch(inputFile, values.worksheet);
       break;
     case 'enrich':
-      throw new Error('The enrich command is not yet implemented.');
+      if (!inputFile) {
+        throw new Error('Input file is required for the enrich command.');
+      }
+      if (!existsSync(inputFile)) {
+        throw new Error(`Input file "${inputFile}" does not exist.`);
+      }
+      if (!values.worksheet) {
+        throw new Error('The --worksheet option is required for the enrich command.');
+      }
+      await runEnrich(inputFile, values.worksheet);
+      break;
     default:
       throw new Error(`Unknown command: ${command}`);
   }

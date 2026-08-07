@@ -23,10 +23,25 @@ export interface EnrichResult {
     notes?: string;
 }
 
-const SEARCH_INPUT_COLUMNS = ['first name', 'last name', 'account name', 'email'];
-const PERSON_ID_COLUMN = 'zoominfo person id';
-// 'title' is the Salesforce Title column - stage 1's 'zoominfo title' is deliberately not touched.
-const ENRICH_OUTPUT_COLUMNS = ['email', 'title', 'phone', 'mobile', 'tool notes'];
+const SEARCH_INPUT_COLUMNS = {
+    firstName: 'first name',
+    lastName: 'last name',
+    accountName: 'account name',
+    email: 'email'
+} as const;
+
+const ENRICH_INPUT_COLUMNS = {
+    zoomInfoPersonId: 'zoominfo person id',
+    inferredContactStatus: 'inferred contact status'
+} as const;
+
+const ENRICH_OUTPUT_COLUMNS = {
+    email: 'email',
+    title: 'title',
+    phone: 'phone',
+    mobile: 'mobile',
+    toolNotes: 'tool notes'
+} as const;
 
 /**
  * Opens the workbook and returns the named worksheet.
@@ -73,7 +88,7 @@ const getHeaders = (worksheet: ExcelJS.Worksheet): Map<string, number> => {
  */
 const readRows = async (worksheet: ExcelJS.Worksheet): Promise<ContactRow[]> => {
     const headers = getHeaders(worksheet);
-    for (const name of SEARCH_INPUT_COLUMNS) {
+    for (const name of Object.values(SEARCH_INPUT_COLUMNS)) {
         if (!headers.has(name)) {
             throw new Error(`Missing expected column "${name}" in worksheet: ${worksheet.name}`);
         }
@@ -87,10 +102,10 @@ const readRows = async (worksheet: ExcelJS.Worksheet): Promise<ContactRow[]> => 
     for (const row of rows) {
         const newRow: ContactRow = {
             rowNumber: row.number,
-            firstName: row.getCell(headers.get('first name')!).value?.toString() ?? '',
-            lastname: row.getCell(headers.get('last name')!).value?.toString() ?? '',
-            company: row.getCell(headers.get('account name')!).value?.toString() ?? '',
-            email: row.getCell(headers.get('email')!).text,
+            firstName: row.getCell(headers.get(SEARCH_INPUT_COLUMNS.firstName)!).value?.toString() ?? '',
+            lastname: row.getCell(headers.get(SEARCH_INPUT_COLUMNS.lastName)!).value?.toString() ?? '',
+            company: row.getCell(headers.get(SEARCH_INPUT_COLUMNS.accountName)!).value?.toString() ?? '',
+            email: row.getCell(headers.get(SEARCH_INPUT_COLUMNS.email)!).text,
         };
         contactRows.push(newRow);
     }
@@ -111,28 +126,32 @@ const readContacts = async (filePath: string, worksheetName: string): Promise<Co
 }
 
 /**
- * Reads enrichment input rows: each data row's ZoomInfo Person ID plus its row number for
- * write-back. Rows with a blank person ID are skipped - they cannot be enriched.
+ * Reads enrichment input rows: each row's ZoomInfo Person ID plus its row number for
+ * write-back. Rows with a blank person ID or non "ACTIVE" status are skipped - they cannot or should not be enriched.
  * @param filePath Path to the input Excel file.
  * @param worksheetName Name of the worksheet tab to read.
  * @returns A promise resolving to an array of EnrichRow objects.
- * @throws Error if the ZoomInfo Person ID column is missing, or no rows are found.
+ * @throws Error if the ZoomInfo Person ID column or status column is missing, or no rows are found.
  */
 const readEnrichRows = async (filePath: string, worksheetName: string): Promise<EnrichRow[]> => {
     const worksheet = await readExcelSheet(filePath, worksheetName);
     const headers = getHeaders(worksheet);
-    if (!headers.has(PERSON_ID_COLUMN)) {
-        throw new Error(`Missing expected column "${PERSON_ID_COLUMN}" in worksheet: ${worksheet.name}`);
+    for (const name of Object.values(ENRICH_INPUT_COLUMNS)) {
+        if (!headers.has(name)) {
+            throw new Error(`Missing expected column "${name}" in worksheet: ${worksheet.name}`);
+        }
     }
-    const rows = worksheet.getRows(2, worksheet.rowCount - 1); // skip header row
-    if (!rows) {
+    // const excelRows = worksheet.getRows(2, worksheet.rowCount - 1); // skip header row
+    const excelRows = worksheet.getRows(2, 11); // limit to 10 rows for testing
+    if (!excelRows) {
         throw new Error(`No rows found in worksheet: ${worksheet.name}`);
     }
 
     const enrichRows: EnrichRow[] = [];
-    for (const row of rows) {
-        const personId = row.getCell(headers.get(PERSON_ID_COLUMN)!).text.trim();
-        if (personId) {
+    for (const row of excelRows) {
+        const personId = row.getCell(headers.get(ENRICH_INPUT_COLUMNS.zoomInfoPersonId)!).text.trim();
+        const inferredStatus = row.getCell(headers.get(ENRICH_INPUT_COLUMNS.inferredContactStatus)!).text.trim();
+        if (inferredStatus === 'ACTIVE' && personId) {
             enrichRows.push({ rowNumber: row.number, personId });
         }
     }
@@ -198,24 +217,27 @@ const writeSearchResults = async (inputPath: string, outputPath: string, results
  * be read or written.
  */
 const writeEnrichResults = async (inputPath: string, outputPath: string, results: EnrichResult[], worksheetName: string): Promise<void> => {
+    // Verify file paths are different to avoid overwriting the input file
     if (inputPath === outputPath) {
         throw new Error(`Input and output paths must be different: ${inputPath}`);
     }
+    // Open the workbook and get the specified worksheet
     const worksheet = await readExcelSheet(inputPath, worksheetName);
     const headers = getHeaders(worksheet);
-    for (const name of ENRICH_OUTPUT_COLUMNS) {
+    for (const name of Object.values(ENRICH_OUTPUT_COLUMNS)) {
         if (!headers.has(name)) {
             throw new Error(`Missing expected column "${name}" in worksheet: ${worksheet.name}`);
         }
     }
 
+    // Write each result into its cell, keyed by rowNumber.
     for (const result of results) {
         const row = worksheet.getRow(result.rowNumber);
-        if (result.email) row.getCell(headers.get('email')!).value = result.email;
-        if (result.jobTitle) row.getCell(headers.get('title')!).value = result.jobTitle;
-        if (result.phone) row.getCell(headers.get('phone')!).value = result.phone;
-        if (result.mobilePhone) row.getCell(headers.get('mobile')!).value = result.mobilePhone;
-        if (result.notes) row.getCell(headers.get('tool notes')!).value = result.notes;
+        if (result.email) row.getCell(headers.get(ENRICH_OUTPUT_COLUMNS.email)!).value = result.email;
+        if (result.jobTitle) row.getCell(headers.get(ENRICH_OUTPUT_COLUMNS.title)!).value = result.jobTitle;
+        if (result.phone) row.getCell(headers.get(ENRICH_OUTPUT_COLUMNS.phone)!).value = result.phone;
+        if (result.mobilePhone) row.getCell(headers.get(ENRICH_OUTPUT_COLUMNS.mobile)!).value = result.mobilePhone;
+        if (result.notes) row.getCell(headers.get(ENRICH_OUTPUT_COLUMNS.toolNotes)!).value = result.notes;
     }
     await worksheet.workbook.xlsx.writeFile(outputPath);
 }

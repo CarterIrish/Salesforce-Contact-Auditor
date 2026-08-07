@@ -50,7 +50,7 @@ const getCached = <T extends SearchResult | EnrichResult>(key: string): T | unde
 
 /**
  * Stores a result under its cache key. Persisted only when saveCache() runs.
- * @param key Cache key from buildCacheKey().
+ * @param key Cache key from buildSearchCacheKey() or buildEnrichCacheKey().
  * @param value The SearchResult or EnrichResult to cache.
  */
 const setCached = <T extends SearchResult | EnrichResult>(key: string, value: T): void => {
@@ -83,5 +83,14 @@ const buildSearchCacheKey = (firstName: string, lastName: string, company: strin
     return `${firstName} ${lastName}|${company}`;
 }
 
-export { loadCache, getCached, setCached, saveCache, buildSearchCacheKey };
+/**
+ * Builds the cache key for enrichment results. Keyed by personId only.
+ * @param personId The ZoomInfo person ID.
+ * @returns Key of the form "personId".
+ */
+const buildEnrichCacheKey = (personId: string): string => {
+    return `personId:${personId}`;
+}
+
+export { loadCache, getCached, setCached, saveCache, buildSearchCacheKey, buildEnrichCacheKey };
 
