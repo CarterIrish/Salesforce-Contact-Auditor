@@ -42,6 +42,7 @@ const ENRICH_OUTPUT_COLUMNS = {
     mobile: 'mobile',
     toolNotes: 'tool notes'
 } as const;
+const EDITED_FILL: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFDE9D9' } };
 
 /**
  * Opens the workbook and returns the named worksheet.
@@ -142,7 +143,7 @@ const readEnrichRows = async (filePath: string, worksheetName: string): Promise<
         }
     }
     // const excelRows = worksheet.getRows(2, worksheet.rowCount - 1); // skip header row
-    const excelRows = worksheet.getRows(2, 11); // limit to 10 rows for testing
+    const excelRows = worksheet.getRows(2, 100); // limit to 100 rows for testing
     if (!excelRows) {
         throw new Error(`No rows found in worksheet: ${worksheet.name}`);
     }
@@ -204,8 +205,24 @@ const writeSearchResults = async (inputPath: string, outputPath: string, results
 }
 
 /**
+ * Internal helper for writeEnrichResults() - writes a value into a cell and marks it with the
+ * edited-cell fill so reviewers can see which cells the run touched.
+ * @param row The worksheet row to write into.
+ * @param colNumber The column number of the cell.
+ * @param value The value to write.
+ */
+const writeEditedCell = (row: ExcelJS.Row, colNumber: number, value: string): void => {
+    const cell = row.getCell(colNumber);
+    cell.value = value;
+    // Cells loaded from a file can share one style object; setting cell.fill would paint every
+    // cell sharing it. Replacing the style object scopes the fill to this cell alone.
+    cell.style = { ...cell.style, fill: EDITED_FILL };
+}
+
+/**
  * Writes enrichment results into the existing Email / Title / Phone / Mobile columns (located by
- * header name), keyed by each result's rowNumber. A field ZoomInfo didn't return is left untouched
+ * header name), keyed by each result's rowNumber, highlighting each written cell with EDITED_FILL.
+ * A field ZoomInfo didn't return is left untouched
  * so existing data is never blanked; notes go to Tool Notes when present. Re-opens the input
  * workbook (leaving all other cells and tabs intact) and saves to a separate output file.
  * Overwrites any existing output file.
@@ -233,10 +250,10 @@ const writeEnrichResults = async (inputPath: string, outputPath: string, results
     // Write each result into its cell, keyed by rowNumber.
     for (const result of results) {
         const row = worksheet.getRow(result.rowNumber);
-        if (result.email) row.getCell(headers.get(ENRICH_OUTPUT_COLUMNS.email)!).value = result.email;
-        if (result.jobTitle) row.getCell(headers.get(ENRICH_OUTPUT_COLUMNS.title)!).value = result.jobTitle;
-        if (result.phone) row.getCell(headers.get(ENRICH_OUTPUT_COLUMNS.phone)!).value = result.phone;
-        if (result.mobilePhone) row.getCell(headers.get(ENRICH_OUTPUT_COLUMNS.mobile)!).value = result.mobilePhone;
+        if (result.email) writeEditedCell(row, headers.get(ENRICH_OUTPUT_COLUMNS.email)!, result.email);
+        if (result.jobTitle) writeEditedCell(row, headers.get(ENRICH_OUTPUT_COLUMNS.title)!, result.jobTitle);
+        if (result.phone) writeEditedCell(row, headers.get(ENRICH_OUTPUT_COLUMNS.phone)!, result.phone);
+        if (result.mobilePhone) writeEditedCell(row, headers.get(ENRICH_OUTPUT_COLUMNS.mobile)!, result.mobilePhone);
         if (result.notes) row.getCell(headers.get(ENRICH_OUTPUT_COLUMNS.toolNotes)!).value = result.notes;
     }
     await worksheet.workbook.xlsx.writeFile(outputPath);
