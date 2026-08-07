@@ -113,7 +113,7 @@ const processContact = async (contact: ContactRow): Promise<SearchResult> => {
     // with THIS contact's rowNumber - the cached rowNumber belongs to whichever row first populated
     // the key, and reusing it would misplace (or blank) duplicate-name rows on write. See §5.
     let cacheKey = cache.buildSearchCacheKey(contact.firstName, contact.lastname, contact.company);
-    let cachedContact = cache.getCached(cacheKey);
+    let cachedContact = cache.getCached<SearchResult>(cacheKey);
     if (cachedContact) {
       return { ...cachedContact, rowNumber: contact.rowNumber };
     }
