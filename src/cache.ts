@@ -1,12 +1,14 @@
 import type { SearchResult } from './search';
+import type { EnrichResult } from './excel';
+
 import fs from 'fs';
 
-let cache: Record<string, SearchResult> = {};
+let cache: Record<string, SearchResult | EnrichResult> = {};
 
 /**
  * Loads the on-disk cache into memory. A missing file starts an empty cache (warns); a read/parse
  * failure logs and also starts empty. Call once at the start of a run.
- * @param filePath Path to the JSON cache store (e.g. data/cache/cache.store).
+ * @param filePath Path to the JSON cache store (e.g. data/cache/search_cache.store).
  */
 const loadCache = (filePath: string): void => {
     // Check if the cache file exists before attempting to read it
@@ -20,7 +22,7 @@ const loadCache = (filePath: string): void => {
     try {
         // Read the cache file synchronously
         const data = fs.readFileSync(filePath, 'utf-8');
-        const parsedCache: Record<string, SearchResult> = JSON.parse(data);
+        const parsedCache: Record<string, SearchResult | EnrichResult> = JSON.parse(data);
         // validate the parsed cache
         if(typeof parsedCache === 'object' && parsedCache !== null) {
             cache = parsedCache;
@@ -40,18 +42,18 @@ const loadCache = (filePath: string): void => {
  * Looks up a previously stored result by cache key. Callers must re-stamp `rowNumber` from the
  * current contact.
  * @param key Cache key from buildCacheKey().
- * @returns The cached SearchResult, or undefined on a miss.
+ * @returns The cached SearchResult or EnrichResult, or undefined on a miss.
  */
-const getCached = (key: string): SearchResult | undefined => {
-    return cache[key];
+const getCached = <T extends SearchResult | EnrichResult>(key: string): T | undefined => {
+    return cache[key] as T | undefined;
 };
 
 /**
  * Stores a result under its cache key. Persisted only when saveCache() runs.
  * @param key Cache key from buildCacheKey().
- * @param value The SearchResult to cache.
+ * @param value The SearchResult or EnrichResult to cache.
  */
-const setCached = (key: string, value: SearchResult): void => {
+const setCached = <T extends SearchResult | EnrichResult>(key: string, value: T): void => {
     cache[key] = value;
 };
 
