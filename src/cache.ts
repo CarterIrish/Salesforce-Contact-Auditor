@@ -77,9 +77,9 @@ const saveCache = (filePath: string): void => {
  * @param company Contact company (Account Name).
  * @returns Key of the form "First Last|Company".
  */
-const buildCacheKey = (firstName: string, lastName: string, company: string): string => {
+const buildSearchCacheKey = (firstName: string, lastName: string, company: string): string => {
     return `${firstName} ${lastName}|${company}`;
 }
 
-export { loadCache, getCached, setCached, saveCache, buildCacheKey };
+export { loadCache, getCached, setCached, saveCache, buildSearchCacheKey };
 

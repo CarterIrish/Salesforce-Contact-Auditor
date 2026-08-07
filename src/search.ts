@@ -4,7 +4,7 @@ import { ContactRow, readContacts, writeSearchResults } from './excel';
 import { contactSearch, ContactSearchResponse, ContactSearchCandidate} from './zoominfo';
 import * as cache from './cache';
 
-const CACHE_FILE_PATH = 'data/cache/cache.store';
+const CACHE_FILE_PATH = 'data/cache/search_cache.store';
 
 /**
  * Runs the phase 1 audit end to end: loads the cache, reads the contact sheet, searches every
@@ -112,7 +112,7 @@ const processContact = async (contact: ContactRow): Promise<SearchResult> => {
     // Cache is keyed by name+company only. A hit reuses ZoomInfo's answer but must be re-stamped
     // with THIS contact's rowNumber - the cached rowNumber belongs to whichever row first populated
     // the key, and reusing it would misplace (or blank) duplicate-name rows on write. See §5.
-    let cacheKey = cache.buildCacheKey(contact.firstName, contact.lastname, contact.company);
+    let cacheKey = cache.buildSearchCacheKey(contact.firstName, contact.lastname, contact.company);
     let cachedContact = cache.getCached(cacheKey);
     if (cachedContact) {
       return { ...cachedContact, rowNumber: contact.rowNumber };
