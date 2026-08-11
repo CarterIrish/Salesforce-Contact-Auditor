@@ -1,6 +1,6 @@
 # Salesforce Contact Auditor
 
-Audits a Salesforce contact export against ZoomInfo and flags each contact's employment status,
+This tool audits a Salesforce contact export against ZoomInfo and flags each contact's employment status,
 so a human only has to review the ambiguous cases instead of searching every name by hand.
 
 You give it an `.xlsx` export and a worksheet tab name, and run one of two commands. `search`
@@ -70,8 +70,7 @@ npm run dev -- search data/input/ContactExport.xlsx --worksheet Carter
 
 ## Reading the output
 
-Your original columns (A–U) are untouched — including Salesforce's own `Contact Status` column,
-which belongs to the CRM, not this tool. The results are appended in new columns:
+Your original columns (A–U) are untouched during the `-- search` operation. The search results are appended in new columns:
 
 | Col | Header | What it holds |
 | --- | --- | --- |
