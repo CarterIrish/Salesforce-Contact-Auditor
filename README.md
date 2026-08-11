@@ -61,6 +61,9 @@ npm run dev -- search data/input/ContactExport.xlsx --worksheet Carter
 ```
 
 - `--worksheet` (`-w`) is required — it picks the tab to audit, and names the output file.
+- `--fresh` (`-f`) is optional and works on both `search` and `enrich`: it skips the cache read for
+  every row, forcing a live ZoomInfo call, and the fresh answer overwrites whatever was cached
+  before. Use it when you want current data instead of whatever's on disk from a prior run.
 - Or run the compiled build: `npm run build`, then `npm start -- search <file> -w <tab>`.
 - A ~2,900-row tab takes **2.5–5 minutes**. Requests are paced at 20/second to stay under
   ZoomInfo's rate limits — this is normal, don't kill it.

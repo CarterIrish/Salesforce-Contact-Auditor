@@ -7,7 +7,7 @@ const ENRICH_CACHE_FILE_PATH = 'data/cache/enrich_cache.store';
 
 
 
-export const runEnrich = async (inputFile: string, worksheetName: string): Promise<void> => {
+export const runEnrich = async (inputFile: string, worksheetName: string, fresh?: boolean): Promise<void> => {
 
     cache.loadCache(ENRICH_CACHE_FILE_PATH);
 
@@ -16,7 +16,7 @@ export const runEnrich = async (inputFile: string, worksheetName: string): Promi
     console.log(`Read ${excelContacts.length} contacts from ${inputFile}`);
 
     // Process each contact and collect results
-    const allResults: EnrichResult[] = await Promise.all(excelContacts.map(contact => processEnrichContact(contact)));
+    const allResults: EnrichResult[] = await Promise.all(excelContacts.map(contact => processEnrichContact(contact, fresh)));
     // Save the cache after processing all contacts
     cache.saveCache(ENRICH_CACHE_FILE_PATH);
 
@@ -33,12 +33,12 @@ export const runEnrich = async (inputFile: string, worksheetName: string): Promi
     await writeEnrichResults(inputFile, `data/output/enriched_${worksheetName}.xlsx`, allResults, worksheetName);
 }
 
-const processEnrichContact = async (contact: EnrichRow): Promise<EnrichResult> => {
+const processEnrichContact = async (contact: EnrichRow, fresh?: boolean): Promise<EnrichResult> => {
     try {
         // Build the cache key & check if contact already cached
         let cacheKey = cache.buildEnrichCacheKey(contact.personId);
         let cachedContact = cache.getCached<EnrichResult>(cacheKey);
-        if (cachedContact) {
+        if (!fresh && cachedContact) {
             return { ...cachedContact, rowNumber: contact.rowNumber };
         }
         // No cached result, call ZoomInfo Enrich endpoint

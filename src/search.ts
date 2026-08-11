@@ -11,15 +11,17 @@ const SEARCH_CACHE_FILE_PATH = 'data/cache/search_cache.store';
  * contact against ZoomInfo, prints a status summary, and writes the annotated output sheet.
  * @param inputFile Path to the input contacts workbook.
  * @param worksheetName Name of the worksheet tab to audit; also names the output file.
+ * @param fresh When true, ignores cached results and re-fetches every contact from ZoomInfo,
+ * overwriting the cache with the fresh answers.
  */
-export const runSearch = async (inputFile: string, worksheetName: string): Promise<void> => {
+export const runSearch = async (inputFile: string, worksheetName: string, fresh?: boolean): Promise<void> => {
   cache.loadCache(SEARCH_CACHE_FILE_PATH);
 
   const contacts = await readContacts(inputFile, worksheetName);
   console.log(`Read ${contacts.length} contacts from ${inputFile}`);
 
   // Process each contact and collect results
-  const allResults: SearchResult[] = await Promise.all(contacts.map(contact => processContact(contact)));
+  const allResults: SearchResult[] = await Promise.all(contacts.map(contact => processContact(contact, fresh)));
 
   cache.saveCache(SEARCH_CACHE_FILE_PATH);
 
@@ -105,16 +107,18 @@ const describeCandidates = (candidates: ContactSearchCandidate[]): string => {
  * compare, rejected-only candidates are NAME_MISMATCH (best candidate's details kept for review),
  * and zero candidates is NOT_FOUND. Never throws - failures are returned as an ERROR result.
  * @param contact The contact row to resolve.
+ * @param fresh When true, skips the cache read (a fresh result is still cached, overwriting any
+ * existing entry).
  * @returns The SearchResult for this contact.
  */
-const processContact = async (contact: ContactRow): Promise<SearchResult> => {
+const processContact = async (contact: ContactRow, fresh?: boolean): Promise<SearchResult> => {
   try {
     // Cache is keyed by name+company only. A hit reuses ZoomInfo's answer but must be re-stamped
     // with THIS contact's rowNumber - the cached rowNumber belongs to whichever row first populated
     // the key, and reusing it would misplace (or blank) duplicate-name rows on write. See §5.
     let cacheKey = cache.buildSearchCacheKey(contact.firstName, contact.lastname, contact.company);
     let cachedContact = cache.getCached<SearchResult>(cacheKey);
-    if (cachedContact) {
+    if (!fresh && cachedContact) {
       return { ...cachedContact, rowNumber: contact.rowNumber };
     }
     // First attempt: search by name + company

@@ -16,6 +16,7 @@ Commands:
 
 Options:
   -w, --worksheet      Worksheet tab to read (required for both search and enrich)
+  -f, --fresh          Ignore cached results and overwrite them with fresh API calls
   -h, --help           Show this help message
 
 Example:
@@ -35,7 +36,7 @@ const main = async () => {
   console.log('---------------------------------------- \n \n');
 
   const args = process.argv.slice(2);
-  const { values, positionals } = parseArgs({ args, options: { help: { type: 'boolean', short: 'h' }, worksheet: { type: 'string', short: 'w' } }, allowPositionals: true });
+  const { values, positionals } = parseArgs({ args, options: { help: { type: 'boolean', short: 'h' }, worksheet: { type: 'string', short: 'w' }, fresh: { type: 'boolean', short: 'f' } }, allowPositionals: true });
   if (values.help || positionals.length === 0) {
     console.log(USAGE);
     return;
@@ -53,7 +54,7 @@ const main = async () => {
       if (!values.worksheet) {
         throw new Error('The --worksheet option is required for the search command.');
       }
-      await runSearch(inputFile, values.worksheet);
+      await runSearch(inputFile, values.worksheet, values.fresh);
       break;
     case 'enrich':
       if (!inputFile) {
@@ -65,7 +66,7 @@ const main = async () => {
       if (!values.worksheet) {
         throw new Error('The --worksheet option is required for the enrich command.');
       }
-      await runEnrich(inputFile, values.worksheet);
+      await runEnrich(inputFile, values.worksheet, values.fresh);
       break;
     default:
       throw new Error(`Unknown command: ${command}`);
