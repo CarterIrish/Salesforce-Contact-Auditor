@@ -88,7 +88,7 @@ Your original columns (A–U) are untouched during the `-- search` operation. Th
 | --- | --- | --- |
 | `ACTIVE` | Identity verified, still at the company in your sheet | Nothing to review — this row is ready for `enrich` as-is |
 | `INACTIVE` | Identity verified, but ZoomInfo shows a *different* current employer | Review: compare `Account Name` (I) against `ZoomInfo Company Name` (X). Company names differ across systems (`Acme Corp` vs `Acme Corporation`), so some of these are false — an AI-assisted diff pass is the plan of record (see architecture §4). A recovered row already has its person ID |
-| `NAME_MISMATCH` | ZoomInfo returned candidates, but none matched the name exactly (nicknames land here on purpose: `Mike` vs `Michael`) | Reviewed together with the `NOT_FOUND` bucket (handed off to other reviewers), but kept as its own status so the rows stay identifiable. For the reviewer: compare column AB against the row's name; if it's the same person, change **column V** to `ACTIVE` — columns W–Z already hold that candidate's details. Never edit Salesforce's own columns |
+| `NAME_MISMATCH` | ZoomInfo returned candidates, but none matched the name exactly (nicknames land here on purpose: `Mike` vs `Michael`) | Reviewed together with the `NOT_FOUND` bucket (handed off to other reviewers), but kept as its own status so the rows stay identifiable. For the reviewer: compare column AB against the row's name, look them up on LinkedIn or google in general; if it's the same person, change **column V** to `ACTIVE` — columns W–Z already hold the first candidates details. To get the ZoomInfo API information for candidates other than the first, use the ZoomInfo API docs ([here](https://docs.zoominfo.com/reference/searchinterface_searchcontact)) to manually look up that person and get their ZI data. Fill in the respective cells with that ZI info and update the Inferred Status |
 | `NOT_FOUND` | Nothing came back from name+company *or* the email fallback | Manual / LinkedIn review. Treat as an upper bound, not a verdict — rows with no email address only got one search attempt |
 | `ERROR` | A request failed; the message is in `Tool Notes` (AA) | Re-run the same command. Errors aren't cached but successes are, so a re-run only retries the failures |
 
@@ -114,7 +114,7 @@ Errors are never cached, so a re-run only retries the rows that failed.
 
 - you changed any matching/enrichment logic (normalization, fallback, name rules, output fields) —
   stale verdicts are otherwise served verbatim, or
-- enough time has passed that you want fresh answers from ZoomInfo.
+- enough time has passed that you want fresh answers from ZoomInfo. Across thousands of contact entries, status drift can occur in just 1 day; sometimes just 1 contact but real world events occur and ZI updates contacts on its own timeframe.
 
 ## Phase 2: enrich
 
@@ -137,8 +137,7 @@ note left by `search` survives alongside anything `enrich` adds.
 
 DoNotCall flags (`directPhoneDoNotCall` / `mobilePhoneDoNotCall`) are **not** checked — every
 number ZoomInfo returns gets written. That's a deliberate choice: the manual audit process never
-considered the DNC flag either, and enforcement belongs to Salesforce's own DNC settings once the
-sheet is loaded back in, not to this tool.
+considered the DNC flag either so the tool follows that precedent. 
 
 Output: `data/output/enriched_<tab>.xlsx`.
 
