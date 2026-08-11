@@ -1,6 +1,6 @@
 // Phase 1: read the contact sheet, check each row against ZoomInfo Contact Search,
 // derive ACTIVE / INACTIVE / NOT_FOUND, write the annotated sheet.
-import { ContactRow, readContacts, writeSearchResults } from './excel';
+import { SearchRow, readSearchRows, writeSearchResults } from './excel';
 import { contactSearch, ContactSearchResponse, ContactSearchCandidate} from './zoominfo';
 import * as cache from './cache';
 
@@ -17,7 +17,7 @@ const SEARCH_CACHE_FILE_PATH = 'data/cache/search_cache.store';
 export const runSearch = async (inputFile: string, worksheetName: string, fresh?: boolean): Promise<void> => {
   cache.loadCache(SEARCH_CACHE_FILE_PATH);
 
-  const contacts = await readContacts(inputFile, worksheetName);
+  const contacts = await readSearchRows(inputFile, worksheetName);
   console.log(`Read ${contacts.length} contacts from ${inputFile}`);
 
   // Process each contact and collect results
@@ -82,10 +82,10 @@ const namesEqual = (a: string | undefined, b: string | undefined): boolean =>
  * @param response Raw ZoomInfo contact search response.
  * @param contact The sheet row the candidates must match.
  */
-const selectMatch = (response: ContactSearchResponse, contact: ContactRow) =>
+const selectMatch = (response: ContactSearchResponse, contact: SearchRow) =>
   response.data.find((candidate: ContactSearchCandidate) =>
     namesEqual(candidate.attributes.firstName, contact.firstName) &&
-    namesEqual(candidate.attributes.lastName, contact.lastname));
+    namesEqual(candidate.attributes.lastName, contact.lastName));
 
 /**
  * Formats candidates as "First Last (Company)", capped at 5, so rejected candidates can be
@@ -111,12 +111,12 @@ const describeCandidates = (candidates: ContactSearchCandidate[]): string => {
  * existing entry).
  * @returns The SearchResult for this contact.
  */
-const processContact = async (contact: ContactRow, fresh?: boolean): Promise<SearchResult> => {
+const processContact = async (contact: SearchRow, fresh?: boolean): Promise<SearchResult> => {
   try {
     // Cache is keyed by name+company only. A hit reuses ZoomInfo's answer but must be re-stamped
     // with THIS contact's rowNumber - the cached rowNumber belongs to whichever row first populated
     // the key, and reusing it would misplace (or blank) duplicate-name rows on write. See §5.
-    let cacheKey = cache.buildSearchCacheKey(contact.firstName, contact.lastname, contact.company);
+    let cacheKey = cache.buildSearchCacheKey(contact.firstName, contact.lastName, contact.company);
     let cachedContact = cache.getCached<SearchResult>(cacheKey);
     if (!fresh && cachedContact) {
       return { ...cachedContact, rowNumber: contact.rowNumber };
@@ -124,7 +124,7 @@ const processContact = async (contact: ContactRow, fresh?: boolean): Promise<Sea
     // First attempt: search by name + company
     let response = await contactSearch({
       firstName: contact.firstName,
-      lastName: contact.lastname,
+      lastName: contact.lastName,
       companyName: contact.company
     });
     let contactMatch = selectMatch(response, contact);
