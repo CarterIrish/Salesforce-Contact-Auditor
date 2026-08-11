@@ -142,8 +142,7 @@ const readEnrichRows = async (filePath: string, worksheetName: string): Promise<
             throw new Error(`Missing expected column "${name}" in worksheet: ${worksheet.name}`);
         }
     }
-    // const excelRows = worksheet.getRows(2, worksheet.rowCount - 1); // skip header row
-    const excelRows = worksheet.getRows(2, 100); // limit to 100 rows for testing
+    const excelRows = worksheet.getRows(2, worksheet.rowCount - 1); // skip header row
     if (!excelRows) {
         throw new Error(`No rows found in worksheet: ${worksheet.name}`);
     }
