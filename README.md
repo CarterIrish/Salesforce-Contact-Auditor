@@ -77,7 +77,7 @@ Your original columns (A–U) are untouched during the `-- search` operation. Th
 | V | `Inferred Contact Status` | The verdict — see the status table below |
 | W | `ZoomInfo Person ID` | The key `enrich` looks up by. Stored as text — **don't** reformat it as a number (Excel will mangle it into `1.4E+10`) |
 | X | `ZoomInfo Company Name` | The person's *current* employer per ZoomInfo |
-| Y | `ZoomInfo Company ID` | Ground-truth company identifier, for company-name adjudication |
+| Y | `ZoomInfo Company ID` | The internal ZoomInfo ID for a requested company. Useful with manual API lookups. |
 | Z | `ZoomInfo Title` | Current job title (free with search) |
 | AA | `Tool Notes` | Multi-match notes, rejection counts, or the error message on `ERROR` rows |
 | AB | `ZoomInfo Rejected Candidates` | `NAME_MISMATCH` only: up to 5 near-miss candidates for eyeball review |
