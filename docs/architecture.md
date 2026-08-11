@@ -1,681 +1,493 @@
 # Salesforce Contact Auditor — Architecture
 
-**Scale:** Single-operator CLI script. ~2,880 contacts. Two phases, run as two separate commands.
+A single-operator TypeScript CLI: two phases, each its own subcommand, each its own process. This
+document explains the code; `README.md` is the operator's guide and is not repeated here.
 
 ---
 
-## 1. What it does
+## 1. Overview
 
-Takes a spreadsheet of Salesforce contacts (name + company), checks each one against ZoomInfo,
-and flags them `ACTIVE`, `INACTIVE`, `NAME_MISMATCH`, or `NOT_FOUND` (or `ERROR` on a failed
-request). The point is to remove the human from the task — no manual ZoomInfo searching.
+The tool audits a Salesforce contact export (`.xlsx`, one worksheet tab per contact list) against
+the ZoomInfo GTM Data API.
 
-**Phase 1 — Search** _(built)_
-Contact Search, one call per row. Determines status. Writes an annotated sheet + prints a summary.
+**Phase 1 — `search`** issues one Contact Search request per row (two when the email fallback fires)
+on first name + last name + company, verifies the candidate's identity, compares ZoomInfo's
+*present* employer against the sheet's company, and writes a status plus the matched ZoomInfo
+details into new columns V–AB of `data/output/annotated_<worksheet>.xlsx`.
 
-**Phase 2 — Enrich** _(built)_
-Contact Enrich, run against rows phase 1 (or a human reviewer) marked `ACTIVE`. Pulls current
-title / email / phone by ZoomInfo person ID — an exact lookup, no re-matching — and writes them
-straight into the sheet's existing columns. Kept as a separate entry point/subcommand so it cannot
-fire by accident and burn credits — Contact Enrich is ZoomInfo's billable tier.
+**Phase 2 — `enrich`** reads back an annotated sheet, keeps only rows marked `ACTIVE` with a person
+ID, and looks each up by that ID — an exact lookup, no re-matching. Current email, title, phone and
+mobile go into the sheet's *existing* columns, producing `data/output/enriched_<worksheet>.xlsx`.
 
-Out of scope: web UI, Salesforce write-back, job queue, database. None of them earn their keep here.
+The phases never chain automatically; between them sits human review of the `INACTIVE`,
+`NAME_MISMATCH` and `NOT_FOUND` buckets.
+
+| Status (column V) | Meaning |
+| --- | --- |
+| `ACTIVE` | Identity verified; normalized company names agree. |
+| `INACTIVE` | Identity verified; ZoomInfo reports a different present employer. |
+| `NAME_MISMATCH` | Candidates returned, none with an exact first + last name match. |
+| `NOT_FOUND` | Neither search returned a candidate. |
+| `ERROR` | The row's request threw; the message lands in `Tool Notes`. |
+
+Out of scope: web UI, Salesforce write-back, database, job queue. Also absent: retry/backoff,
+request batching, search pagination, DoNotCall checks.
 
 ---
 
-## 2. Structure
+## 2. Project layout
 
 ```
 salesforce-contact-auditor/
 ├── src/
-│   ├── cli.ts         # The only entry point.  npm run dev -- search data/input/contacts.xlsx -w <tab>
-│   ├── search.ts      # Phase 1 workflow — runSearch(inputFile, worksheet, fresh), dispatched by cli.ts
-│   ├── enrich.ts      # Phase 2 workflow — runEnrich(inputFile, worksheet, fresh), dispatched by cli.ts
-│   ├── auth.ts        # getBearerToken() — the token seam. See §7 step 3.
-│   ├── zoominfo.ts    # contactSearch() + contactEnrich(), both behind the shared request-level throttle.
-│   ├── excel.ts       # readContacts()/writeSearchResults() for phase 1; readEnrichRows()/writeEnrichResults() for phase 2
-│   └── cache.ts       # Keyed JSON file cache, shared by both phases (different key shape each). See §6.
-├── dist/              # tsc output, gitignored. npm start runs dist/cli.js.
-├── data/              # GITIGNORED — real people's PII. Verified: test.xlsx is ignored.
-│   ├── input/
-│   ├── output/
-│   └── cache/         # search_cache.store and enrich_cache.store — separate files, separate key shapes
-├── .env               # CLIENT_ID / CLIENT_SECRET — Client Credentials Flow, exchanged for a
-│                      # short-lived bearer token by auth.ts and cached in memory until near expiry
-├── .env.example       # Committed. No real values.
-├── names.csv          # Nickname → formal-name lookup for a future nickname rule. Unused by src/.
-└── README.md          # The handoff artifact — see §8.
+│   ├── cli.ts         # Entry point: dotenv, parseArgs, validation, routing, top-level error net
+│   ├── search.ts      # Phase 1: runSearch, status derivation, name acceptance, company normalization
+│   ├── enrich.ts      # Phase 2: runEnrich, enrich-response interpretation
+│   ├── auth.ts        # getBearerToken: client-credentials token, single-flight in-memory cache
+│   ├── zoominfo.ts    # Contact Search / Contact Enrich clients, their types, the request throttle
+│   ├── excel.ts       # All workbook I/O and the column contract for both phases
+│   └── cache.ts       # In-memory result store with JSON file load/save
+├── dist/              # tsc output, gitignored. `npm start` runs dist/cli.js
+├── data/              # GITIGNORED — real PII. input/ · output/ · cache/
+├── docs/              # This file plus exported diagram renders (Architecture_Diagram.svg / .png)
+├── .env               # CLIENT_ID / CLIENT_SECRET (.env.example is committed, placeholders only)
+├── names.csv          # Nickname → formal-name lookup. Nothing in src/ reads it
+└── README.md          # Operator guide
 ```
 
-### Code flow
+**Dependencies:** `exceljs` `^4.4.0` and `dotenv` `^17.4.2` at runtime; `typescript` `^7.0.2`, `tsx`
+`^4.23.1`, `@types/node` `^26.1.1` in dev. HTTP is the global `fetch`; there is no CLI framework
+(`parseArgs` from `node:util`), no validation library, no rate-limit library, and no test framework
+(`npm test` is a placeholder).
 
-Exported renders live at `docs/Architecture_Diagram.svg` / `.png`
+**Toolchain.** `"type": "commonjs"`; `tsconfig.json` sets `target: ES2020`,
+`module`/`moduleResolution: nodenext`, `strict: true`, `rootDir: src`, `outDir: dist`. Scripts: `dev`
+= `tsx src/cli.ts`, `build` = `tsc`, `start` = `node dist/cli.js`. No `engines` field is declared;
+Node 18 or newer is required in practice because the code calls global `fetch`.
+
+**Filesystem contract.** Both cache paths and both output paths are relative, so runs start from the
+repo root. No module creates directories — `data/cache/` and `data/output/` must already exist.
+
+---
+
+## 3. Architecture
+
+```
+runtime imports:                              type-only (erased at compile time,
+                 cli.ts                        so there is no runtime cycle):
+          (runSearch)   (runEnrich)           excel.ts --> search.ts  (SearchResult)
+           search.ts     enrich.ts            cache.ts --> search.ts  (SearchResult)
+           /   |   \     /   |   \            cache.ts --> excel.ts   (EnrichResult)
+      excel  cache  zoominfo  cache  excel
+        |             |
+     exceljs       auth.ts --> global fetch
+```
+
+| Module | Responsibility | Key exports |
+| --- | --- | --- |
+| `cli.ts` | Parses argv, validates command/file/worksheet, dispatches, owns the single `.catch` and exit code. | none — runs `main().catch(...)` at module scope |
+| `search.ts` | Phase 1 orchestration and every phase 1 rule: acceptance, normalization, status. | `runSearch` (also default export), `SearchResult` |
+| `enrich.ts` | Phase 2 orchestration: cache lookup, enrich call, response interpretation, per-row error containment. | `runEnrich` |
+| `zoominfo.ts` | Typed client for both endpoints; owns the throttle. | `contactSearch`, `contactEnrich`, the request/response interfaces, `ContactEnrichMatchStatus` |
+| `auth.ts` | OAuth 2.0 client-credentials token, single-flight in-memory cache. | `getBearerToken` |
+| `excel.ts` | All workbook I/O and the column contract. | `readSearchRows`, `writeSearchResults`, `readEnrichRows`, `writeEnrichResults`, `SearchRow`, `EnrichRow`, `EnrichResult` |
+| `cache.ts` | One in-memory result record, loaded from and saved to a JSON file whose path is passed per call. | `loadCache`, `getCached`, `setCached`, `saveCache`, `buildSearchCacheKey`, `buildEnrichCacheKey` |
+
+`SearchRow` is input and `SearchResult` is output; they share only `rowNumber`, the join key between
+sheet and results. `personId` is a `string` everywhere in the codebase and becomes a `number` exactly
+once, inside `contactEnrich`. Exported renders of the flow below live at
+`docs/Architecture_Diagram.svg` / `.png`.
 
 ```mermaid
 flowchart TB
-    subgraph P1["PHASE 1: SEARCH (built)"]
-        CLI["cli.ts search --worksheet Carter"] --> READ["excel.ts readContacts"]
-        READ --> PROC["search.ts processContact<br/>one per row"]
-        PROC --> CACHE{"cache.ts getCached"}
-        CACHE -- hit --> WRITE
-        CACHE -- miss --> SEARCH["zoominfo.ts contactSearch<br/>firstName + lastName + companyName<br/>companyPastOrPresent"]
+    subgraph P1["PHASE 1: search"]
+        CLI["cli.ts — search file -w tab"] --> READ["excel.readSearchRows<br/>every data row, unfiltered"]
+        READ --> PROC["search.processContact<br/>one per row, all dispatched at once"]
+        PROC --> CACHE{"cache.getCached<br/>key: name + company"}
+        CACHE -- "hit, no --fresh" --> WRITE
+        CACHE -- miss --> SEARCH["zoominfo.contactSearch<br/>firstName + lastName + companyName<br/>+ companyPastOrPresent"]
         SEARCH --> SEL1{"selectMatch<br/>exact first AND last name"}
-        SEL1 -- accepted --> COMP{"normalizeCompanyName<br/>company match?"}
-        SEL1 -- none accepted --> FB["contactSearch<br/>emailAddress only"]
+        SEL1 -- accepted --> COMP{"normalizeCompanyName<br/>equal?"}
+        SEL1 -- "none accepted, row has email" --> FB["zoominfo.contactSearch<br/>emailAddress only"]
+        SEL1 -- "none accepted, no email" --> REJ
         FB --> SEL2{"selectMatch"}
         SEL2 -- accepted --> COMP
-        SEL2 -- "candidates, none accepted" --> NM["NAME_MISMATCH<br/>candidates to col AB"]
-        SEL2 -- zero candidates --> NF["NOT_FOUND"]
+        SEL2 -- "none accepted" --> REJ{"any candidates<br/>returned?"}
         COMP -- yes --> ACT["ACTIVE"]
         COMP -- no --> INA["INACTIVE"]
-        ACT --> WRITE["cache.setCached<br/>excel.ts writeResults<br/>cols V to AB"]
+        REJ -- yes --> NM["NAME_MISMATCH<br/>best candidate to W-Z, list to AB"]
+        REJ -- no --> NF["NOT_FOUND"]
+        ERR["ERROR — any throw in the row<br/>message to AA, never cached"] --> WRITE
+        ACT --> WRITE["cache.setCached<br/>excel.writeSearchResults writes V-AB"]
         INA --> WRITE
         NM --> WRITE
         NF --> WRITE
     end
-    subgraph BP["BETWEEN PHASES: not code"]
-        ANNOT["annotated_TAB.xlsx"]
-        ANNOT --> AID["human/AI diff company names<br/>on INACTIVE rows"] --> HV["human confirms<br/>recovered rows"]
-        ANNOT --> ML["manual review, offloaded<br/>NAME_MISMATCH + NOT_FOUND"]
-        HV --> FILT["rows flipped to ACTIVE<br/>in col V"]
-        ML -. any recovered .-> FILT
-        FILT --> VER["same sheet, col V now final"]
-    end
-    WRITE --> ANNOT
-    subgraph P2["PHASE 2: ENRICH (built)"]
-        ECLI["cli.ts enrich --worksheet ACTIVE"] --> RD2["excel.ts readEnrichRows<br/>status == ACTIVE and personId present"]
-        RD2 --> PROC2["enrich.ts processEnrichContact<br/>one per row"]
-        PROC2 --> CACHE2{"cache.ts getCached<br/>keyed by personId"}
-        CACHE2 -- hit --> WRITE2
-        CACHE2 -- miss --> CE["zoominfo.ts contactEnrich<br/>by personId, exact lookup"]
+    WRITE --> REVIEW
+    REVIEW["annotated_tab.xlsx → human review:<br/>INACTIVE company diff, NAME_MISMATCH and NOT_FOUND queue,<br/>recovered rows flipped to ACTIVE in column V"] --> ECLI
+    subgraph P2["PHASE 2: enrich"]
+        ECLI["cli.ts — enrich file -w tab"] --> RD2["excel.readEnrichRows<br/>status ACTIVE and person ID non-blank"]
+        RD2 --> PROC2["enrich.processEnrichContact<br/>one per row"]
+        PROC2 --> CACHE2{"cache.getCached<br/>key: personId"}
+        CACHE2 -- "hit, no --fresh" --> WRITE2
+        CACHE2 -- miss --> CE["zoominfo.contactEnrich<br/>exact lookup by personId"]
         CE --> ATT{"data[0].attributes<br/>present?"}
-        ATT -- no --> NODATA["nothing written<br/>notes = matchStatus"]
+        ATT -- no --> NODATA["no fields written<br/>notes = matchStatus or NO_DATA"]
         ATT -- yes --> FIELDS["email, jobTitle,<br/>phone, mobilePhone"]
-        NODATA --> WRITE2["cache.setCached<br/>excel.ts writeEnrichResults<br/>overwrites Email/Title/Phone/Mobile in place<br/>+ EDITED_FILL highlight"]
+        NODATA --> WRITE2["cache.setCached<br/>excel.writeEnrichResults overwrites<br/>Email/Title/Phone/Mobile in place + fill"]
         FIELDS --> WRITE2
     end
-    VER --> ECLI
-    AUTH["auth.ts getBearerToken<br/>client credentials, cached ~1hr"]
+    AUTH["auth.getBearerToken<br/>client credentials, cached in memory"]
     SEARCH -.-> AUTH
     FB -.-> AUTH
     CE -.-> AUTH
 ```
 
-**Runtime dependencies:** `exceljs`, `dotenv`. Native `fetch`. (`chalk` was dropped — plain
-console output is enough for a single-operator CLI.)
-**Toolchain:** TypeScript strict; `tsx` runs the dev loop (`npm run dev -- <command> <file>`), `tsc`
-builds to `dist/` (`npm start`). CommonJS package (ESM `import` syntax, compiled to `require`) with
-`nodenext` module resolution. (The original reason for `nodenext` — chalk 5 being ESM-only, which
-`node16` resolution can't `require()` — left with chalk; the setting stays because it's current and
-harmless.)
-
-No test framework, no CLI framework (arg parsing is `parseArgs` from `node:util`), no validation
-library, no rate-limit library. **Rate limiting** is a hand-rolled request-level throttle in
-`zoominfo.ts` (`throttle()` + a module-level `nextSlot`): every request reserves the next time slot
-synchronously before awaiting, so concurrent callers get spaced out instead of bursting. ZoomInfo's
-documented limits are 25 req/s, 54,000/hr, 648,000/day; only the per-second limit binds a single run
-(2,880 rows + fallbacks ≈ 5,760 requests, far under the hourly/daily caps), and the throttle paces to
-**20 req/s** for headroom — pacing at exactly 25 trips 429s on jitter/clock-skew. A full run is
-~2.5–5 minutes.
-
-> **Superseded design (2026-07-21):** this section used to read "rate limiting is four lines: send 25,
-> wait a second, repeat," done at the chunk level in `search.ts`. That undercounted — each contact
-> fires 1–2 requests (name+company, then the email fallback), so a 25-contact chunk was 25–50
-> requests, and `Promise.all` fired them as a burst rather than paced. Both caused 429s. Throttling
-> moved to the request level (every request passes through `contactSearch`, fallbacks included) so the
-> limit counts requests, not contacts. **Removed (2026-07-23):** the chunk loop is gone — `runSearch`
-> now maps every contact straight through `processContact`, each request paced by the throttle.
-
-**One entry point, not two.** An earlier revision of this doc specced separate entry files per phase
-so enrich could never fire by accident. The design moved to a single `cli.ts` routing `search` /
-`enrich` subcommands — the guard survives because `enrich` is its own explicit subcommand with its
-own required `--worksheet` flag, never a side effect of running `search`. cli.ts validates user
-input at the boundary (file must exist, command must be known, `--worksheet` present) and owns the
-single top-level `.catch` that prints errors and sets the exit code; workflow modules trust their
-inputs and communicate failure by throwing.
+`cli.ts` validates per branch in a fixed order — input file present, `existsSync`, then
+`--worksheet` — and rejects `--worksheet ""` like an omitted flag. Options are `--help`/`-h`,
+`--worksheet`/`-w`, `--fresh`/`-f`, with `allowPositionals: true` and Node's default `strict: true`,
+so an unrecognized option throws out of `parseArgs`.
 
 ---
 
-## 3. Phase 1: the status check
+## 4. Phase 1: search
 
-### Input schema (confirmed against the real export)
+### Input worksheet
 
-The real export (`data/input/ContactExport.xlsx`) is a multi-tab workbook, not a single sheet:
-per-person contact tabs (`Carter`, `Zoe`, `Kylie`), plus `Account List` and `Summary` (unused).
-The tab is chosen at the CLI (`--worksheet <name>` / `-w`, required for `search`; built 2026-07-27):
-the name threads through **both** `readExcelSheet` callers — `readContacts()` and `writeResults()` —
-so read and write always target the same tab, and it names the output file
-(`data/output/annotated_<tab>.xlsx`) so tabs never clobber each other. A missing tab errors with the
-workbook's actual worksheet names. All three tabs ran clean on 2026-07-27 — see §7.
+`readSearchRows` requires four headers in row 1, matched by lowercased text at any position:
+`first name`, `last name`, `account name`, `email` — lookup by header rather than by fixed letter,
+because the real export hides columns. Every data row (2..`rowCount`) is returned, unfiltered; names
+and company are read with `cell.value?.toString() ?? ''`, email with `cell.text`, which always
+yields a string.
 
-Column layout on a contact tab, confirmed live (`B`, `E`, `K` are hidden in Excel — invisible when
-reading the header row by eye, but present and readable via ExcelJS same as any other column):
+Layout of a contact tab in the real export (`B`, `E`, `K` are hidden in Excel, read normally through
+ExcelJS). `search` never modifies A–U, including `L` (`Contact Status`), a CRM-managed field; V
+onward must be free.
 
-| Col | Header                  | Col | Header                           | Col | Header             |
-| --- | ----------------------- | --- | -------------------------------- | --- | ------------------ |
-| A   | Account Last Update     | H   | Account ID                       | O   | Phone              |
-| B   | Contact ID _(hidden)_   | I   | Account Name                     | P   | Mobile             |
-| C   | First Name              | J   | Account Owner                    | Q   | Email              |
-| D   | Last Name               | K   | Account: Created Date _(hidden)_ | R   | Last Modified By   |
-| E   | Contact Name _(hidden)_ | L   | Contact Status                   | S   | Last Modified Date |
-| F   | Created Date            | M   | Title                            | T   | Email Opt Out      |
-| G   | Created By              | N   | Department                       | U   | NOTES              |
+| Col | Header | Col | Header | Col | Header |
+| --- | --- | --- | --- | --- | --- |
+| A | Account Last Update | H | Account ID | O | Phone |
+| B | Contact ID *(hidden)* | I | Account Name | P | Mobile |
+| C | First Name | J | Account Owner | Q | Email |
+| D | Last Name | K | Account: Created Date *(hidden)* | R | Last Modified By |
+| E | Contact Name *(hidden)* | L | Contact Status | S | Last Modified Date |
+| F | Created Date | M | Title | T | Email Opt Out |
+| G | Created By | N | Department | U | NOTES |
 
-`V` through `AC` were confirmed empty on all three contact tabs — the tool writes `V`–`AB` there.
-**Existing columns (A–U) are never modified**, including `L`
-(`Contact Status`) — that's a CRM-managed field, not this tool's to overwrite. See Output columns
-below.
+### The request
 
-**Endpoint:** `POST https://api.zoominfo.com/gtm/data/v1/contacts/search` (JSON:API —
-`content-type: application/vnd.api+json`). One contact per request; **no batching**. ~2,880 rows +
-fallbacks, paced at 20 req/s ≈ 2.5–5 minutes (see §2 rate limiting).
+`POST https://api.zoominfo.com/gtm/data/v1/contacts/search`, with `accept` and `content-type` both
+`application/vnd.api+json`:
 
 ```jsonc
 {
   "data": {
-    "type": "ContactSearch", // ← exact casing required; "contactSearch" returns 400
+    "type": "ContactSearch",              // exact casing; "contactSearch" returns 400
     "attributes": {
-      "firstName": "Paul",
-      "lastName": "Adams",
-      "companyName": "CrunchTime! Information Systems Inc",
-      "companyPastOrPresent": "pastAndPresent", // ← the whole design rests on this
-    },
-  },
+      "firstName": "…", "lastName": "…", "companyName": "…",
+      "companyPastOrPresent": "pastAndPresent"   // added only when companyName is truthy
+    }
+  }
 }
 ```
 
-The email fallback (§ "Search field fallback") sends a single `"emailAddress"` attribute instead —
-**`email` is not a valid field name** and returns `400 PFAPI0005 "Invalid field requested"` (learned
-live 2026-07-21). `contactSearch()` builds `attributes` from whatever partial criteria it's given and
-adds `companyPastOrPresent` only when a `companyName` is present.
+`contactSearch` builds `attributes` from whatever criteria are not `undefined`, throwing
+`"At least one search criteria must be provided"` if nothing survives. No paging or output-field
+attributes are sent, so `data` is the API's default page and `meta.totalResults` is the only signal
+that more exist. Two API behaviors shape the design:
 
-`pastAndPresent` widens _what the search matches on_ (present **or** past employment) while the
-response still reports _where the person is now_. That collapses all three statuses into one call.
+- **The response reports the contact's present employer, not the company that caused the match.**
+  Each candidate carries `attributes.company.{id,name}`, `attributes.jobTitle` and an `id` (the
+  person ID), so matching on past *and* present employment while reading back the present company
+  collapses "still there" and "moved on" into one call — the assumption the design rests on.
+- **Search behaves like an AND across supplied fields**, so one stale field bundled with good ones
+  sinks the match — hence sequential attempts with different field subsets rather than one combined
+  request. The fallback field is `emailAddress`; `email` is not a valid field name and returns
+  `400 PFAPI0005 "Invalid field requested"`.
 
-**Verified against the live API.** Searching a contact who has left `CrunchTime!` returns:
+### Acceptance and fallback
 
-```jsonc
-{
-  "data": [
-    {
-      "id": "14062844524", // ← personId. Phase 2's key.
-      "attributes": {
-        "company": { "id": 557414001, "name": "Blue Mountain" }, // ← PRESENT company, not the matched one
-        "jobTitle": "Chief Information Security Officer", // ← free. Capture it.
-        "contactAccuracyScore": 98,
-        "hasEmail": true,
-        "hasMobilePhone": true, // ← booleans, not values. Enrich is the billable tier.
-        "lastUpdatedDate": "2026-06-18T20:59:00Z",
-        "validDate": "2026-07-08T20:38:00Z",
-      },
-    },
-  ],
-  "meta": { "totalResults": 1 },
-}
-```
+`selectMatch` accepts the first candidate whose first name **and** last name equal the row's,
+compared with `toLocaleLowerCase()` + `trim()`, `undefined` coerced to `''`; all candidates are
+scanned in returned order until one passes. Company, email, title and id play no part, and there is
+no punctuation stripping, accent folding, nickname handling or fuzzy matching, so nicknames and
+initials land in `NAME_MISMATCH` for a human. The strictness exists because phase 2 enriches by
+`personId` and its output is reloaded into Salesforce — a wrong-person match does not merely
+mislabel a row, it overwrites a real contact's data.
 
-The response reports the **present** employer, not the company that caused the match. This was the
-one assumption that could have silently invalidated the design. It holds.
+The email fallback fires when **no candidate was accepted** — not merely when none were returned —
+and the row has a non-empty email. It sends `{ emailAddress }` alone and runs the same
+`selectMatch`, so an email-matched record whose names differ is still rejected. If it also fails,
+its candidates join the rejected list, deduplicated by candidate `id`. Afterwards the `notes` line
+reports the *email* search's `meta.totalResults`.
 
-### Deriving status
+### Status derivation
 
-**The acceptance rule (added 2026-07-27, `selectMatch` in `search.ts`):** ZoomInfo's search is fuzzy
-— it _proposes_ candidates, it does not confirm identity. A candidate is **accepted** only when its
-first name AND last name equal the sheet row's (case-insensitive, whitespace-trimmed, otherwise
-character-exact). The check scans every returned candidate in order and applies identically to both
-search paths (name+company and the email fallback). Rationale: phase 2 enriches by `personId` and
-**updates Salesforce records** — a wrong-person match doesn't just mislabel a row, it overwrites a
-real contact's data. A false `NOT_FOUND` costs a manual lookup; a false `ACTIVE` corrupts a record;
-the tool fails toward the cheap error. Nicknames (`Mike` vs `Michael`), initials, and punctuation
-variants are deliberately rejected — they land in `NAME_MISMATCH` for a human to confirm, not in the
-verified set. (Fuzzy/edit-distance matching was measured and rejected — see §7, 2026-07-27.) A
-nickname→formal-name lookup (`names.csv`, repo root) is committed for a future nickname-matching
-rule; nothing in `src/` reads it yet.
+Evaluated in this order inside `processContact`:
 
-| Condition                                         | Status                                                                                                    |
-| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| No candidate returned by either search            | `NOT_FOUND` — ZoomInfo has nothing for any field we hold                                                  |
-| Candidates returned, none accepted                | `NAME_MISMATCH` — somebody close came back, identity unverified; best candidate's details kept for review |
-| Accepted match, normalized `company` **==** input | `ACTIVE` (compare is normalized — see §5)                                                                 |
-| Accepted match, normalized `company` **!=** input | `INACTIVE` — matched on past employment; they've moved on                                                 |
-| `totalResults > 1`                                | First _accepted_ candidate wins (API default sort, `-relevance`); flagged in `Tool Notes`                 |
+| Condition | Status | Also recorded |
+| --- | --- | --- |
+| `!fresh` and a cache hit | the cached status | All cached fields verbatim except `rowNumber`, re-stamped from the current row. No API call, no re-cache. |
+| No accepted match, no candidates from either search | `NOT_FOUND` | Nothing but `rowNumber` and `status`. Cached. |
+| No accepted match, candidates present | `NAME_MISMATCH` | From `rejected[0]`: `personId`, `zi_company`, `zi_company_id`, `zi_title`; `notes` = `` `${rejected.length} candidate(s) rejected: name mismatch.` ``; `rejectedCandidates` = up to 5 entries as `First Last (Company)` joined with `'; '`, plus `; +N more`. Cached. |
+| Accepted match, normalized companies equal | `ACTIVE` | `personId`, `zi_company`, `zi_company_id`, `zi_title` from the matched candidate. Cached. |
+| Accepted match, normalized companies differ | `INACTIVE` | Same field set as `ACTIVE`. Cached. |
+| Any throw inside the row's `try` | `ERROR` | `notes` = the error message. **Not cached**, so a re-run retries exactly the failures. |
 
-> **Not sorting by `contactAccuracyScore`** (decided 2026-07-21): the score measures ZoomInfo's
-> confidence in a single profile's own data quality (employment + email currency), not whether that
-> profile is the person actually being searched for — it can't tell two different same-named people
-> at the same company apart any better than relevance can. Relying on the API's default `-relevance`
-> sort and flagging every multi-match row in `notes` is honest about the ambiguity rather than
-> pretending accuracy resolves it.
-
-### Search field fallback (found live, 2026-07-20)
-
-A single `firstName` + `lastName` + `companyName` search misses real contacts, because Salesforce
-and ZoomInfo each carry an independent, sometimes-stale record of the same person — no one field is
-reliably correct across every contact:
-
-- One contact returned no hit on name alone, name + company, name + phone, or name + email — but hit
-  immediately on email alone or phone alone. Cause: the Salesforce `First Name` is a nickname
-  ("Cc"); ZoomInfo's record uses a different (likely formal) first name, so every name-based
-  combination failed.
-- A second contact hit cleanly on name + company but returned nothing once `email` was added to the
-  same request. Cause: likely a stale Salesforce email — exactly the population this tool cares about
-  most (people who've moved on).
-
-Together these rule out "throw more fields into one request." ZoomInfo's search behaves like an
-**AND** across whatever fields are provided, not an OR — combining fields narrows the match rather
-than broadening it, so one wrong/stale field bundled in with correct ones can sink an otherwise-good
-match.
-
-**Design: sequential fallback, not a combined request.** Try `firstName` + `lastName` +
-`companyName` first (cheapest, correct for the common case). If `totalResults === 0`, retry with
-`emailAddress` alone. Only mark `NOT_FOUND` once every fallback with data available has come back empty.
-`contactSearch()` needs to accept partial criteria (not a fixed argument list) so `search.ts` can
-call it multiple times with different subsets — each attempt is its own request, not a combined one.
-Phone is a candidate third fallback (it hit for the nickname case above); hold off building it until
-email-only has been tried against the real run and judged insufficient.
-
-> **Built (2026-07-21):** the sequential fallback is implemented in `processContact` — name+company
-> first, then a single `emailAddress`-only retry when `totalResults === 0` and an email exists. The
-> fallback field is `emailAddress`, not `email` (see the endpoint note above). Phone as a third
-> fallback is still deferred, and the fallback hasn't been specifically re-verified against real
-> nickname/stale-email cases post-fix — check that during the first full run.
-
-> **Updated (2026-07-27):** the fallback now retriggers on **"no accepted match"** rather than
-> `totalResults === 0`, so a wrong-person hit on name+company no longer blocks the email attempt.
-> Fallback results pass through the same name check as everything else (measured earlier: the
-> fallback carries ~14% of all matches, which is why it survived the restart).
+On `ACTIVE` / `INACTIVE` rows, `notes` is set only when `meta.totalResults > 1`, to
+`` `${totalResults} matches found; used the first name-verified one.` ``, and `rejectedCandidates`
+is never set. `normalizeCompanyName` is used **only** for the `ACTIVE` / `INACTIVE` compare — never
+for acceptance, never in the cache key: `toLocaleLowerCase()` → strip `.` and `,` → strip the
+whole-word tokens `inc`, `incorporated`, `corp`, `corporation`, `llc`, `ltd`, `co`, `company` →
+collapse whitespace → `trim()`, compared with strict `===`.
 
 ### Output columns
 
-Existing columns (A–U) untouched, per the input schema note above. New columns append starting at `V`:
+`writeSearchResults` re-opens the input workbook, writes the seven header labels into row 1, then
+writes all seven cells for every result keyed by `rowNumber` — optional fields fall back to `''`, so
+a re-run blanks stale values rather than leaving them. Rows absent from the results, columns A–U and
+every other tab are untouched, and output goes to a different path (a guard rejects
+`inputPath === outputPath`), so the annotated file is a drop-in replacement for the input. V and AA
+are named `Inferred Contact Status` and `Tool Notes` rather than `Contact Status` / `Notes` so they
+do not collide with Salesforce's own L and U headers, which anything keying on header text would
+otherwise resolve ambiguously.
 
-| Column (header)                | Col | Source         | Notes                                                                                           |
-| ------------------------------ | --- | -------------- | ----------------------------------------------------------------------------------------------- |
-| `Inferred Contact Status`      | V   | derived        | `ACTIVE` / `INACTIVE` / `NAME_MISMATCH` / `NOT_FOUND` / `ERROR`                                 |
-| `ZoomInfo Person ID`           | W   | candidate `id` | **Phase 2's key.** Write as **text** — `"14062844524"` as a number renders as `1.40628E+10`.    |
-| `ZoomInfo Company Name`        | X   | `company.name` | Lets a human sanity-check every `INACTIVE`                                                      |
-| `ZoomInfo Company ID`          | Y   | `company.id`   | Ground-truth company match; feeds the AI INACTIVE review (§5). Written as **text** — see below. |
-| `ZoomInfo Title`               | Z   | `jobTitle`     | Free in search. Part of phase 2, already paid for.                                              |
-| `Tool Notes`                   | AA  | derived        | Multi-match note, rejected-candidate count, or the error message when `status` is `ERROR`.      |
-| `ZoomInfo Rejected Candidates` | AB  | derived        | `NAME_MISMATCH` only: up to 5 rejected candidates as `First Last (Company)` for eyeball review. |
+| Col | Header | Value written |
+| --- | --- | --- |
+| V | `Inferred Contact Status` | `result.status` |
+| W | `ZoomInfo Person ID` | `result.personId ?? ''` — phase 2's key |
+| X | `ZoomInfo Company Name` | `result.zi_company ?? ''` — lets a human sanity-check every `INACTIVE` |
+| Y | `ZoomInfo Company ID` | `result.zi_company_id?.toString() ?? ''` — as text; Excel renders a long all-digit value as `1.40628E+10` when the cell is numeric |
+| Z | `ZoomInfo Title` | `result.zi_title ?? ''` — free with search |
+| AA | `Tool Notes` | `result.notes ?? ''` |
+| AB | `ZoomInfo Rejected Candidates` | `result.rejectedCandidates ?? ''` |
 
-On `NAME_MISMATCH` rows, W–Z are populated from the **best (first-returned) rejected candidate** —
-deliberately, so a human who confirms the match has the `personId` in hand with no re-search. That
-personId is **unverified by definition**; it is safe only because `verified.xlsx` / phase 2 consume
-`ACTIVE` rows exclusively, and a mismatch row becomes `ACTIVE` only by explicit human edit.
-
-The V and AA headers were renamed (2026-07-27) from `Contact Status` / `Notes` to avoid duplicate
-header names against Salesforce's own columns `L` (`Contact Status`) and `U` (`NOTES`) — anything
-keying on header text would otherwise resolve ambiguously.
-
-> **Built (2026-07-23).** `writeResults(inputPath, outputPath, results)` re-opens the input workbook
-> and appends columns V–AA keyed by `rowNumber`, leaving A–U (and every other tab) untouched, then
-> saves to a separate file under `data/output/` (a guard rejects `inputPath === outputPath`). Both
-> `personId` (W) and `zi_company_id` (Y) are written as **strings**, not numbers — otherwise a long
-> all-digit ID renders as `1.40628E+10`, and even a shorter ID falls back to scientific notation in a
-> narrow General-format column. `search.ts` **awaits** the call so a write failure (e.g. the output
-> file open in Excel) surfaces through cli.ts's error net instead of an unhandled rejection.
-
-Then: filter to `status = ACTIVE`, save as `verified.xlsx` — that's phase 2's input.
-
-**Why `personId` matters:** Enrich accepts it as a match input, so phase 2 becomes an exact lookup.
-Without it, phase 2 redoes phase 1's name+company matching from scratch — and can arrive at a
-_different_ answer than phase 1 did.
+`runSearch` logs `Read <n> contacts from <file>` and then
+`Summary: <a> active, <b> inactive, <c> name mismatch, <d> not found, <e> errors`.
 
 ---
 
-## 4. Phase 2: the enrich pass
+## 5. Phase 2: enrich
 
-`enrich.ts` / `runEnrich(inputFile, worksheetName, fresh)`, dispatched by the `enrich` subcommand.
-Reads the **same worksheet** phase 1 wrote to (or a human then edited) — there is no separate
-"trimmed" file format. `readEnrichRows` (excel.ts) requires the header row to contain `ZoomInfo
-Person ID` and `Inferred Contact Status` (the columns phase 1 writes), plus keeps only rows where
-`Inferred Contact Status` (col V) is exactly `ACTIVE` **and** `ZoomInfo Person ID` (col W) is
-non-blank — every other row (`INACTIVE`, `NAME_MISMATCH`, `NOT_FOUND`, `ERROR`, or a stray blank
-personId) is silently skipped. That's the whole guard: nothing reaches enrich without either
-passing phase 1's exact-name check or being explicitly flipped to `ACTIVE` by a person.
+### Which rows qualify
 
-**Endpoint:** `POST https://api.zoominfo.com/gtm/data/v1/contacts/enrich` (same JSON:API shape as
-search, `type: "ContactEnrich"`). One request per `personId` — `matchPersonInput: [{ personId }]`
-(the string is `Number()`-coerced; a non-numeric id throws before the request is sent) —
-`outputFields: [email, mobilePhone, phone, jobTitle]`. Same request-level throttle as search (§2);
-both endpoints draw from the same in-process `nextSlot` clock in `zoominfo.ts`, though the two
-commands are never run in the same process.
+`readEnrichRows` requires the headers `zoominfo person id` and `inferred contact status`, and keeps a
+row only when the trimmed `Inferred Contact Status` equals exactly `ACTIVE` (case-sensitive, so
+`Active` is skipped) **and** the trimmed `ZoomInfo Person ID` is non-empty. Everything else is
+dropped silently, with no log line and no count; `enrich.ts` does no filtering itself.
 
-**The `attributes`-can-be-missing bug (found + fixed 2026-08-11).** ZoomInfo doesn't always return
-an empty `data` array for a non-match — for certain match statuses (`NO_MATCH`, `OPT_OUT`, and
-others) it returns a `data` entry with a `meta.matchStatus` but **no `attributes` object at all**.
-The original code assumed `data.length > 0` implied `attributes` existed and crashed reading
-`enrichData.email`. Fixed in `processEnrichContact`: the guard is
-`result.data.length === 0 || !result.data[0].attributes`; when attributes are missing, no fields
-are written and `notes` records the `matchStatus` (falling back to `'NO_DATA'` if even that's
-absent). `LIMIT_EXCEEDED` results are deliberately **not cached**, so a re-run retries them instead
-of permanently remembering a quota hit from a specific day.
+That filter is the entire safety guard: nothing is enriched without either passing phase 1's
+exact-name check or being explicitly flipped to `ACTIVE` by a person. A `NAME_MISMATCH` row already
+carries the rejected candidate's `personId` in W, so flipping V is the only edit needed; a
+`NOT_FOUND` or `ERROR` row has no person ID, so flipping V alone achieves nothing. Since those
+headers exist only because phase 1 wrote them — and `writeEnrichResults` additionally requires
+`tool notes` (AA) beside the export's own `email`, `title`, `phone`, `mobile` — **enrich cannot run
+against a raw Salesforce export.**
 
-**Cache:** keyed by `personId` alone (`buildEnrichCacheKey`), stored separately from search's cache
-at `data/cache/enrich_cache.store` — see §6 for how the two caches share one module.
+### The request
 
-**Write-back (`writeEnrichResults`, excel.ts) overwrites in place, unlike search.** Search only ever
-appends new columns (V–AB); enrich writes straight into the sheet's existing `Email` / `Title` /
-`Phone` / `Mobile` columns (located by header name, not fixed letters), because the output is meant
-to be reloaded directly into Salesforce. A field ZoomInfo didn't return leaves the existing cell
-untouched — nothing is ever blanked. Every written cell gets a light-orange `EDITED_FILL` so a
-reviewer can see exactly what changed, applied via `cell.style = { ...cell.style, fill }` — **not**
-`cell.fill =`, which mutates a style object ExcelJS cells loaded from a file can share, painting
-every other cell with that same format across the whole workbook instead of just the one written
-cell. `Tool Notes` (AA) is **appended to** with `' | '` rather than overwritten, so a note phase 1
-left (e.g. a multi-match caveat) survives alongside anything enrich adds.
+`POST https://api.zoominfo.com/gtm/data/v1/contacts/enrich`, same JSON:API headers:
 
-**DoNotCall decision (2026-08-10) — decided against, not deferred.**
-`directPhoneDoNotCall` / `mobilePhoneDoNotCall` are never requested or checked; phone and mobile
-are written unconditionally whenever ZoomInfo returns them. The manual audit process this tool
-replaces never gated on the DNC flag either, so the tool doesn't introduce new blocking behavior
-beyond what that process already had — enforcement is Salesforce's own DNC settings once the sheet
-is reloaded, not this tool's job.
+```jsonc
+{
+  "data": {
+    "type": "ContactEnrich",
+    "attributes": {
+      "matchPersonInput": [{ "personId": 14062844524 }],   // one element, never batched
+      "outputFields": ["email", "mobilePhone", "phone", "jobTitle"]
+    }
+  }
+}
+```
 
-**Operational note: neither cache persists incrementally, and enrich is no exception.** In both
-`runSearch` and `runEnrich`, `cache.saveCache()` runs once, after `Promise.all` resolves for every
-contact in the batch — not per-row as results come in. Killing a run partway through loses that
-run's progress entirely, even though per-contact errors are caught individually (in
-`processEnrichContact`'s own try/catch) and don't crash the batch. Let a run finish — including a
-buggy one, if it isn't actively corrupting data — rather than interrupting it.
+`contactEnrich` throws `"personId is required for contact enrichment"` on a falsy id and
+`"personId must be a valid number"` when `Number(personId)` is `NaN`; that coercion is the
+string→number boundary and doubles as sanitization for junk cell text.
 
-> **Full run (2026-08-11).** `data/input/Salesforce Contact Audit (2023-2026).xlsx`, worksheet
-> `ACTIVE`, 2,314 rows → **2,305 enriched / 9 no data / 0 errors**, output at
-> `data/output/enriched_ACTIVE.xlsx`. The 9 no-data rows (8 `NO_MATCH`, 1 `OPT_OUT`) were confirmed
-> as normal ZoomInfo data churn since the `search` pass weeks earlier — not a tool bug, not worth
-> chasing.
+### Response handling
 
----
+Only `data[0]` is examined. The guard is `result.data.length === 0 || !result.data[0].attributes` —
+ZoomInfo returns a record carrying a `meta.matchStatus` but **no `attributes` object at all** for
+several match statuses, so a non-empty array does not imply fields are present.
 
-## 5. The one design risk left: company names don't match across systems
+- **Guard taken:** no fields written; `notes` becomes `data[0]?.meta?.matchStatus || 'NO_DATA'`, and
+  the result is cached unconditionally.
+- **Guard not taken:** the four fields below are copied out individually, and `notes` becomes the
+  `matchStatus` unless it is `'FULL_MATCH'`, in which case `notes` is `undefined` so the ordinary
+  success case leaves `Tool Notes` untouched. `COMPANY_ONLY_MATCH` and `CONTACT_ONLY_MATCH` are
+  noted like any other non-`FULL_MATCH` value. Cached unless the status is `LIMIT_EXCEEDED`.
 
-`Acme Corp` · `Acme Corporation` · `Acme Corp.` · `ACME`
+| API attribute | `EnrichResult` field | Destination column (by header) |
+| --- | --- | --- |
+| `email` | `email` | `email` |
+| `jobTitle` | `jobTitle` | `title` |
+| `phone` | `phone` | `phone` |
+| `mobilePhone` | `mobilePhone` | `mobile` |
+| `meta.matchStatus` | `notes` | `tool notes` |
 
-Salesforce and ZoomInfo do not agree on company names. A naive `===` marks an active contact as
-`INACTIVE`. This is now the **only** remaining soft spot in the design — and the API response hands
-over the fix: **`company.id`**. Compare IDs, not strings.
+### Write-back
 
-Build the ID map for free, in two passes, with zero extra API calls:
+Unlike search, which only appends, `writeEnrichResults` overwrites existing columns — located by
+header name, never by letter — because the output is reloaded into Salesforce. Only truthy fields
+are written, so a field ZoomInfo did not return leaves the cell as it was; nothing is ever blanked.
+Each written value cell gets a light-orange fill (`pattern`/`solid`, argb `FFFDE9D9`) applied as
+`cell.style = { ...cell.style, fill }` — **not** `cell.fill`, because cells loaded from a file can
+share one style object and mutating it would paint every cell sharing that style. `Tool Notes` is
+the exception: written directly with no fill, and *appended* — when the cell is non-empty the new
+note is joined with `' | '`, so a note left by search survives.
 
-1. **Pass 1** — normalized string compare (lowercase, strip punctuation and `Inc / Corp / LLC / Ltd
-/ Co`). Every clean match teaches you `"CrunchTime! Information Systems Inc" → 557414001`. The
-   2,880 contacts map to only a few hundred unique accounts, so most accounts will have at least one
-   clean hit that reveals their `companyId`.
-2. **Pass 2** — re-check _only_ the rows that came out `INACTIVE`, comparing `company.id` against the
-   learned map. Any that flip to `ACTIVE` were never gone — just spelled differently.
-
-For accounts that never get a clean hit, fall back to a company-search lookup for those few.
-
-> **Pass 1 built; Pass 2 deferred (2026-07-21).** The normalized string compare is implemented —
-> `normalizeCompanyName` in `search.ts`: lowercase, strip periods and commas and
-> `inc/incorporated/corp/corporation/llc/ltd/co/company`. On a 50-row sample it flipped 7 false
-> `INACTIVE`s to `ACTIVE` (5→12 active; `NOT_FOUND` unchanged at 29 — the right signal, since
-> normalization only touches the ACTIVE/INACTIVE compare, not findability). But residue remains:
-> eyeballing showed genuine same-company mismatches normalization can't bridge (abbreviations,
-> rebrands). **Decision:** rather than build the `company.id` two-pass now, surface `zi_company`
-> (column X) in the output so a human can adjudicate the remaining `INACTIVE`s by eye. Revisit the
-> two-pass only if that residue proves too large to review by hand.
-
-> **Update (2026-07-23) — the full run reframed this.** Against all 2,885 `Carter` rows: 545 ACTIVE,
-> 911 INACTIVE, 1,429 NOT_FOUND, 0 errors. 911 INACTIVEs is too many to eyeball, so the plan is an
-> **AI adjudication pass**: diff each row's input `Account Name` (col I) against the returned
-> `zi_company` (col X), with `zi_company_id` (col Y) as the ground-truth tiebreaker, to recover false
-> INACTIVEs (spelling variants, rebrands, abbreviations). This supersedes the `company.id` two-pass —
-> an LLM handles rebrands/abbreviations an ID map alone would miss — and a recovered row already
-> carries its `personId`, so it drops straight into phase 2 with no re-search. Bias the pass toward
-> **escalating ambiguous cases to human review** rather than auto-recovering, so a genuine job change
-> (parent/subsidiary, similarly-named firm) isn't silently promoted back into the ACTIVE set.
-
-> **Present-company assumption confirmed** against the live response. (Superseded: this used to also
-> claim `fullName` search avoided first/last name issues — the design switched to separate
-> `firstName`/`lastName` fields since ZoomInfo's API accepts them individually, and live testing then
-> surfaced a real first-name failure mode. See §3's Search field fallback note.)
+`runEnrich` logs the post-filter row count and `Summary: <a> enriched, <b> no data, <c> errors`. The
+tally keys on the notes string: a note starting with `Error` counts as an error, otherwise any of
+the four fields being present counts as enriched, otherwise no-data — so a `FULL_MATCH` returning
+none of the four counts as no-data.
 
 ---
 
-## 6. Two small things worth building anyway
+## 6. Cross-cutting mechanisms
 
-**The cache (~10 lines).** A JSON file keyed by `name|company`, checked before each call. It exists
-for one scenario: you run all 2,880 rows and the Excel writer throws on row 2,700. Without a cache,
-fixing that bug and re-running costs another 2,880 lookups. With one, it costs zero. It's what lets
-you iterate on the output format freely.
+**Auth.** `auth.ts` runs the OAuth 2.0 client-credentials flow:
+`POST https://api.zoominfo.com/gtm/oauth/v1/token`, `Authorization: Basic
+base64(CLIENT_ID:CLIENT_SECRET)`, `Content-Type: application/x-www-form-urlencoded`, body
+`grant_type=client_credentials`. Credentials come from `process.env`, populated by `cli.ts`'s
+`import 'dotenv/config'`. Three module-level variables — `cachedToken`, `cachedTokenExpiresAt`,
+`pendingFetch` — form a single-flight cache for the process. Expiry is
+`Date.now() + expires_in*1000 - 60_000` (`EXPIRY_SAFETY_MARGIN_MS`), `expires_in` defaulting to
+`3600` when absent. `pendingFetch` is assigned synchronously before any await, so under a
+`Promise.all` fan-out the first caller starts the POST and every other joins the same promise
+instead of stampeding the endpoint; a `.finally()` clears it on success and failure alike.
+`getBearerToken` returns the bare token and `zoominfo.ts` builds the lowercase
+`authorization: Bearer <token>` header. No disk persistence, no 401-triggered refresh, no retry —
+expiry is decided purely by the clock, and one token fetch per run is normal.
 
-> **Built (2026-07-23)** in `cache.ts` (`loadCache` / `getCached` / `setCached` / `saveCache` /
-> `buildCacheKey`), a JSON file at `data/cache/cache.store`. Two subtleties the full run surfaced:
->
-> - **`rowNumber` must not be reused from the cache.** The cached value is a whole `SearchResult`
->   including `rowNumber`, but `rowNumber` is per-row while the key is per-(name+company). On a hit,
->   `processContact` re-stamps it from the current contact (`{ ...cached, rowNumber: contact.rowNumber }`);
->   without that, duplicate name+company rows collide on write and some rows come out blank. The cold
->   run hid this — `Promise.all` races past the empty cache so nothing hits it; the bug only bites a
->   warm re-run.
-> - **The key omits the email fallback, so a warm run ≠ the cold run by a row or two.** Two rows with
->   the same name+company but different emails can legitimately get different answers (one email hits,
->   the other doesn't); the key collapses them to whichever was cached last. Seen as a single
->   NOT_FOUND→INACTIVE flip on the first warm run, then stable. Within tolerance; add `email` to
->   `buildCacheKey` if exact cold/warm reproducibility is ever needed.
->
-> **Wipe the cache file before any re-run that changes matching logic** (normalization, fallback,
-> tab handling) — stale answers are otherwise served verbatim.
+**Throttle.** `zoominfo.ts` holds one module-level `nextSlot` cursor with
+`MAX_REQUESTS_PER_SECOND = 20` and `MIN_INTERVAL_MS = 1000 / 20`, i.e. one slot every 50 ms, shared
+by both endpoints:
 
-> **Split into two files, one shared module (2026-08-10).** The single `data/cache/cache.store`
-> above didn't survive contact with phase 2: `cache.ts` now stores either a `SearchResult` or an
-> `EnrichResult` under the same `Record<string, ...>` shape, and `loadCache` / `getCached` /
-> `setCached` / `saveCache` all take the store's file path as an argument instead of assuming one
-> global file. `search.ts` and `enrich.ts` each point them at their own file
-> (`data/cache/search_cache.store`, `data/cache/enrich_cache.store`) and never see each other's
-> entries. Enrich's key is `personId` alone (`buildEnrichCacheKey`) — a straight lookup by ID,
-> unlike search's name+company compound key (`buildSearchCacheKey`, formerly just `buildCacheKey`).
->
-> **Neither cache persists incrementally.** In both `runSearch` and `runEnrich`, `saveCache()` runs
-> once, after `Promise.all` resolves for every contact in the batch — not per-row as results come
-> in. Killing a run partway through loses that run's progress entirely (nothing new was written to
-> disk yet), even though per-contact failures are caught individually and don't crash the batch.
-> Let a run finish — including a buggy one, if it isn't actively corrupting data — rather than
-> interrupting it; see §4 for where this bit the first enrich run.
+```ts
+const now = Date.now();
+const wait = Math.max(0, nextSlot - now);
+nextSlot = Math.max(now, nextSlot) + MIN_INTERVAL_MS;
+if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
+```
 
-**Keeping `NOT_FOUND` genuinely distinct from `INACTIVE`.** A missing or misspelled company in the
-input produces an empty response — identical to "this person left." Same result, opposite meaning.
-Keeping them separate is what stops the tool from confidently reporting good contacts as dead.
+The reservation happens **synchronously, before the await** — the only reason the limiter works
+under `Promise.all`: N concurrent callers observe the advanced cursor and fan out to +50 ms,
++100 ms, +150 ms instead of all computing the same wait and firing together. `Math.max(now,
+nextSlot)` stops an idle period from banking slots in the past. Both request functions order their
+work `getBearerToken()` → `throttle()` → `fetch()`, so the token request is never throttled and the
+fan-out is unbounded in promises but paced in HTTP requests.
 
----
+**Cache.** `cache.ts` holds **one** module-level `Record<string, SearchResult | EnrichResult>`.
+Nothing binds it to a path: the path is an argument to `loadCache` / `saveCache`, the key builder is
+chosen by the caller (`buildSearchCacheKey` → `` `${firstName} ${lastName}|${company}` ``,
+`buildEnrichCacheKey` → `` `personId:${personId}` ``), and the value type is chosen through
+`getCached<T>`. Neither builder normalizes anything; search keys are case-sensitive and use the raw
+company string. Separation of `data/cache/search_cache.store` from `data/cache/enrich_cache.store`
+rests entirely on `cli.ts` running one phase per process. On-disk format is pretty-printed JSON
+despite the `.store` extension, with no TTL, entry cap, eviction or schema version.
 
-## 7. Build order
+`loadCache` runs once before the fan-out, `saveCache` once after; `setCached` only mutates memory.
+**No exported cache function can throw to its caller** — a missing, corrupt or unwritable store logs
+and degrades to a cold or discarded cache, including a missing `data/cache/` directory, where the
+run reports success having persisted nothing. `rowNumber` is re-stamped from the current row on
+every hit (`{ ...cachedContact, rowNumber: contact.rowNumber }`): both keys are per-person, so a
+cached entry's own `rowNumber` belongs to whichever row first populated the key, and reusing it
+would misplace or blank duplicate rows on write. `--fresh` skips the cache *read*, not the write — a
+fresh run still calls `setCached`, overwriting the entry.
 
-> **Status (2026-08-11).** Phase 2 is done. `enrich.ts` + the `enrich` subcommand were built
-> (2026-08-10), a real bug was found and fixed the same day the first full `ACTIVE` run was made
-> (2026-08-11: 2,314 rows → 2,305 enriched / 9 no data / 0 errors — see §4 for the bug and the run),
-> the DoNotCall question was decided against rather than left open, and `README.md` was extended
-> with a full `## Phase 2: enrich` section plus updated cache/project-layout sections (§8). Both
-> phases now run clean end-to-end against real data. **Still open:** `package.json` is still at
-> `0.2.0` despite two completed phases — worth a version bump now that phase 2 has landed; the
-> exported diagram images (`docs/Architecture_Diagram.svg`/`.png`) were last regenerated 2026-07-28
-> and no longer match the mermaid source in §2 (now includes the phase 2 flow) — regenerate them
-> from a mermaid renderer when convenient; and the optional 429 retry-with-backoff insurance
-> mentioned below was never built (the throttle alone has kept 429s at zero through every run so
-> far).
+**Concurrency and failure model.** One `Promise.all` per run over every row, created in a single
+synchronous `map` pass, with no batching and no concurrency cap in either workflow module.
+Consequently every cache lookup happens before any `setCached`, so two rows sharing a key both call
+the API within a run — the cache only dedupes *across* runs. Serialized: the token fetch, the cache
+load, the cache save, the workbook write.
 
-> **Status (2026-07-27, end of day). Stage 1 audit complete on all three tabs.** The day began with
-> a deliberate **restart**: the 07-24 → 07-27 branch work had over-complicated the tool, so it was
-> reset to `aa33e99` (the 2026-07-23 state) and rebuilt lean. What landed, in order:
->
-> - **`--worksheet` / `-w` flag** — threads through both `readExcelSheet` callers, drives the
->   per-tab output filename `annotated_<tab>.xlsx`, and a missing tab errors with the workbook's
->   real worksheet names.
-> - **Strict name matching** (`selectMatch`, §3 "Deriving status") — a candidate is accepted only
->   when first AND last name equal the row's (case-insensitive/trimmed), applied response-side to
->   both search paths; the email fallback retriggers on "no accepted match". Driven by the phase-2
->   requirement that a `personId` must never belong to an unverified person. Fuzzy matching was
->   measured and rejected: it could rescue only ~35 rows/tab while the exact-surname-divergent-first
->   population (nicknames) is ~4× larger and carries weaker identity evidence — ambiguity goes to a
->   human instead.
-> - **`NAME_MISMATCH` status + `ZoomInfo Rejected Candidates` (AB)** — candidates returned, none
->   accepted. W–Z carry the best rejected candidate (§3 Output columns) for one-step human review.
-> - Output headers V/AA renamed to `Inferred Contact Status` / `Tool Notes` (duplicate-header
->   collision with Salesforce's L/U columns).
->
-> Full runs, 0 errors each: `Carter` 433 ACTIVE / 734 INACTIVE / 301 NAME*MISMATCH / 1,417 NOT_FOUND ·
-> `Zoe` 511 / 635 / 352 / 1,392 · `Kylie` 505 / 721 / 320 / 1,334 — totals **1,449 / 2,090 / 973 /
-> 4,143** over 8,655 rows, a 40.9% programmatic hit rate with an 11.2% human-review queue. The three
-> annotated tabs were combined (manually, Move-or-Copy) into **`data/output/AnnotatedContacts.xlsx`**
-> — per-tab status counts verified identical to the per-tab outputs; that file is now the working
-> copy, the three `annotated*\*.xlsx` are archives.
->
-> **Remaining work (updated 2026-08-05):**
->
-> 1. ~~Review the 973 `NAME_MISMATCH` rows~~ **Offloaded (2026-08-05):** the `NAME_MISMATCH`
->    review goes to other reviewers, folded into the same manual-review bucket as `NOT_FOUND` —
->    but the rows keep their own status in column V so they stay identifiable. The review
->    mechanics are unchanged for whoever does it: compare AB against the row's First/Last, flip
->    confirmed rows in **V** (not Salesforce's L).
-> 2. ~~Write the phase 2 enrichment flow~~ **Done (2026-08-10/11)** — see §4.
-> 3. Version bump 0.2.0 → 0.3.0 with the next milestone commit. (`README.md` was written 2026-08-05
->    — see §8 — and everything through the chalk removal is committed and pushed.) **Still not done
->    as of 2026-08-11** despite phase 2 landing — see the §7 top status note.
+| Scope | What lands there | Effect |
+| --- | --- | --- |
+| Per row | Non-OK HTTP, network or JSON-parse failure, token failure, bad criteria | `processContact` / `processEnrichContact` wrap their whole body in one `try`/`catch` that returns a value rather than rethrowing, so `Promise.all` never rejects. The row is written out as `status: 'ERROR'` with the message in `notes` (search), or with `notes` beginning `Error during enrichment: ` (enrich). `enrich.ts` also logs `Error processing contact: <error>` to stderr, with no row number or person ID. |
+| Per run | CLI validation (missing/nonexistent input file, missing `--worksheet`, unknown command, anything `parseArgs` throws); read failures (worksheet not found — the error lists the workbook's real tab names — required header missing from row 1, no data rows, unreadable workbook); write failures (`inputPath === outputPath`, missing enrich output column, unwritable workbook, typically the output file being open in Excel) | Rejects the workflow promise, reaches `main().catch` in `cli.ts`, which prints the message plus the full usage text, then `process.exit(1)`. |
 
-> **Status (2026-07-23).** First full run done — all 2,885 `Carter` rows tagged, **0 errors**:
-> **545 ACTIVE, 911 INACTIVE, 1,429 NOT_FOUND**. Everything on the 2026-07-21 pickup list below is
-> now closed: `writeResults()` built and **awaited** in `runSearch`; the `[object Object]` email bug
-> fixed (`readRows` reads `cell.text`); the chunk loop removed; the 200-row dev cap lifted
-> (`getRows(2, rowCount - 1)`). `cache.ts` built (§6), including the `rowNumber` re-stamp fix.
-> (`package.json` is still at **0.2.0** — bump to **0.3.0** with this milestone's commit.)
->
-> **Read NOT_FOUND with care:** ~half the list. It asserts only that name+company _and_ the email
-> fallback both came back empty — not that the person is truly gone. Rows with no email only ever got
-> one shot, and phone (a candidate third fallback, §3) isn't built. Treat 1,429 as an upper bound and
-> route it to manual/LinkedIn review, not as a confirmed count.
->
-> **Downstream workflow (agreed):** ZoomInfo search for all rows → AI company-diff to recover false
-> INACTIVEs (§5) → manual review of NOT_FOUNDs. Each bucket goes to a different resolver; a recovered
-> INACTIVE already carries its `personId` for phase 2.
->
-> **Next — finish the search branch (implementing 2026-07-24 onward).** The driving goal is a clean
-> handoff to **EchoStor** at internship end, so the next dev can follow the intent and build on it —
-> favor legibility over cleverness. Behavior gets decided at the CLI, so it's chosen at call time:
->
-> - **`--worksheet <name>` flag.** Replaces the hardcoded `'Carter'` in `readExcelSheet`, threaded
->   through both callers (`readContacts` + `writeResults`) so read and write always hit the same tab.
->   Also the source for the output filename (e.g. `annotated_<worksheet>.xlsx`), so tabs never clobber
->   each other. On a missing tab, the error lists the workbook's actual worksheets, built dynamically
->   from `workbook.worksheets` — **not** a hardcoded Carter/Zoe/Kylie list; if that enumeration proves
->   unworkable, fall back to a clear generic error rather than a stale list.
-> - **`--fresh` flag.** Skips the cache **load** (re-searches every contact) but still **saves** the
->   fresh results — the ergonomic version of the §6 "wipe before a matching-logic change" note.
-> - **Move config into `cli.ts`.** Worksheet, cache path, and output path become call-time decisions
->   instead of constants in `search.ts`.
-> - **Cleanup / bugs for readability:** type the ZoomInfo response (drop `contactSearch`'s `any` so
->   `processContact`'s `response.meta.totalResults` / `response.data[0].attributes…` are
->   self-documenting); remove the dead `if (!workbook)` guard in `readExcelSheet`; fix the `'carter'`
->   vs `'Carter'` error casing (moot once the flag lands); drop the unused `key` in `zoominfo.ts`'s
->   destructure.
-> - **Then** run the `Zoe` and `Kylie` tabs (target 2026-07-27) and bump the version once the branch
->   is done. Still-open insurance: **429 retry-with-backoff** in `contactSearch`.
->
-> **Status (end of day, 2026-07-21):** Phase 1 now runs clean end-to-end against real data — reads
-> the sheet, searches every contact (name+company, then the email fallback), derives status, and
-> prints per-row results plus a summary tally (`X active, Y inactive, Z not found, N errors`). Every
-> error class hit during today's first bulk runs is closed:
->
-> - **Auth cold-start stampede (401s).** The 25 concurrent first-chunk calls each saw an empty token
->   cache and fired their own token fetch; ZoomInfo invalidates all but the last, so the whole first
->   chunk 401'd. Fixed in `auth.ts` with an in-flight-promise guard (`pendingFetch`) so concurrent
->   callers share a single fetch; it also now uses the real `expires_in` and clears the guard via
->   `.finally()` so a failed fetch can't permanently poison auth.
-> - **`email` field 400s.** The fallback sent an `email` attribute, but the endpoint only accepts
->   `emailAddress` (`400 PFAPI0005`) — meaning _every_ fallback had been silently failing. Fixed.
-> - **429 rate-limit.** Chunk-level pacing undercounted fallbacks and burst via `Promise.all`.
->   Replaced with a request-level throttle at 20 req/s in `zoominfo.ts`; 429s went to zero. See §2.
-> - **False `INACTIVE`s from company-name mismatch.** `normalizeCompanyName` added; residual
->   mismatches handled by surfacing `zi_company` for human review. See §5.
->
-> Committed and pushed; version bumped to **0.2.0**. Still on the **200-row dev cap** — no full
-> 2,880-row run yet.
->
-> **Pick up here tomorrow, in order:**
->
-> 1. **Build `writeResults()` in `excel.ts`** — the last piece before there's an actual output file
->    (tomorrow's headline goal). Writes derived columns V–AA keyed by `rowNumber`, leaves A–U
->    untouched, writes `personId` as **text**, and saves to a _new_ file under `data/output/` — never
->    overwrite the input. Then wire the `writeResults(...)` call into `search.ts` (the TODO at the end
->    of `runSearch`).
-> 2. **Fix the `[object Object]` email bug in `excel.ts`.** Hyperlinked email cells come back from
->    ExcelJS as `{ text, hyperlink }` objects, so `readRows`' `.value?.toString()` yields
->    `"[object Object]"`, which then poisons the email fallback for those rows. Extract the display
->    text (e.g. `cell.text`, or handle the object shape). Same file as (1) — do them together.
-> 3. **Cleanup:** remove the now-redundant chunk loop + 1s inter-chunk sleep in `search.ts` (the
->    request-level throttle handles pacing now), and drop the now-unused `getBearerToken` import there.
-> 4. **Then** raise the dev cap toward the full 2,880 and do a real run (step 7): eyeball false
->    `INACTIVE`s and the `NOT_FOUND` rate, and decide whether §5's `company.id` two-pass is worth it.
->
-> Optional / not blocking tomorrow's goal: **429 retry-with-backoff** in `contactSearch` (the throttle
-> alone got 429s to zero on the dev run, but a longer full run or shared-account usage could still
-> 429 — a good insurance policy before the first full run), and **`cache.ts`** (§6).
-
-0. ~~Verify the search response returns the _present_ company.~~ **Done** — see §3.
-1. ~~`.gitignore` `data/` and `.env` — first commit, before any real sheet lands in the repo.~~
-   **Done.** `data/input/test.xlsx` confirmed ignored.
-2. ~~`cli.ts` — subcommand router, error net, toolchain (tsx dev loop / tsc build).~~ **Done.**
-3. ~~`auth.ts` — `getBearerToken()`, the token seam.~~ **Done.** Implements ZoomInfo's Client
-   Credentials Flow: `CLIENT_ID` / `CLIENT_SECRET` from `.env`, exchanged via HTTP Basic auth for a
-   bearer token (`POST /gtm/oauth/v1/token`, `grant_type=client_credentials`). The token is cached
-   in memory and re-minted automatically once it's within 60s of `expires_in` — `zoominfo.ts` just
-   calls `getBearerToken()` and never learns where tokens come from. **Concurrency-safe** (added
-   2026-07-21): an in-flight-promise guard (`pendingFetch`) means N simultaneous callers share one
-   token fetch instead of stampeding the token endpoint — see the §7 status note for the 401 bug this
-   fixed. `.env.example` committed with placeholder keys; live smoke test against the token endpoint
-   passed.
-4. ~~`excel.ts` — reads the real sheet into `ContactRow[]`, keyed off the header row.~~ **Done.**
-   `readContacts(filePath)` and `writeResults()` are the exports; `readExcelSheet`/`getHeaders`/
-   `readRows`/`setHeaders` are private helpers underneath them. No pre-flight existence check — cli.ts
-   already gated the path; `excel.ts`'s
-   job is making the _open_ failure readable (locked-by-Excel, vanished file, missing column) by
-   rethrowing with the path and a hint. `writeResults()` now built too (§3, Output columns). Still
-   open: multi-tab expansion (the `'Carter'` hardcode in `readExcelSheet`, shared by both callers).
-5. ~~`zoominfo.ts` — `contactSearch()` accepts partial criteria per §3's fallback.~~ **Done.** Takes
-   a `ContactSearchCriteria` object, builds `attributes` from whatever's provided, adds
-   `companyPastOrPresent` only with a `companyName`, and guards empty criteria. Email field is
-   `emailAddress`. Includes the request-level throttle (§2). Still returns `any` — no response typing.
-6. ~~Status logic + fallback loop.~~ **Done** in `search.ts` / `processContact` (name+company →
-   `emailAddress` fallback → `ACTIVE`/`INACTIVE`/`NOT_FOUND`/`ERROR`). `cache.ts` **built** (§6),
-   including the `rowNumber` re-stamp fix. The full run threw 0 errors; the fallback's effectiveness
-   on nickname/stale-email cases is folded into the NOT_FOUND review rather than separately verified.
-7. ~~Normalization + full run.~~ **Done.** `normalizeCompanyName` (§5 Pass 1) in place; the full
-   2,885-row `Carter` run completed (545 / 911 / 1,429, 0 errors). The false-`INACTIVE` question is
-   resolved in favor of an AI company-diff pass over the `company.id` two-pass (§5, 2026-07-23 update).
-8. ~~Output sheet + summary.~~ **Done.** The summary line prints, and `writeResults()` writes the
-   annotated sheet to `data/output/` (§3).
-9. ~~Run the remaining tabs (`Zoe`, `Kylie`)~~ **Done 2026-07-27** (all three tabs — see the status
-   note above). The `NAME_MISMATCH` queue was offloaded to other reviewers rather than reviewed
-   in-tool (2026-08-05, see the top status note); there is no separate `verified.xlsx` — `enrich`
-   reads the same sheet directly, keeping only rows a reviewer marked `ACTIVE` in column V (§4).
-   Phase 1 done.
-
-**Phase 2: done** — see §4 for the full flow, the 2026-08-11 bug fix, and the first full run
-(2,314 rows, 2,305 enriched / 9 no data / 0 errors).
+**Nothing is retried anywhere** — no backoff, no 429 or 5xx handling. A non-OK response costs that
+row its result for that run, and error results are never cached in either phase, so a re-run retries
+exactly the failures. The sharp edge: **an auth or API outage does not fail the run.** Every row
+catches its own error, so a total outage yields a complete output workbook in which every row reads
+`ERROR` or carries an `Error during enrichment: …` note, and the process still exits 0.
 
 ---
 
-## 8. Handoff
+## 7. Design decisions
 
-The tool outlives the internship, so `README.md` is a real deliverable, not an afterthought:
+- **Exact name matching, not fuzzy.** Measured against the real data, edit-distance matching could
+  rescue on the order of 35 rows per tab, while the exact-surname/divergent-first-name population
+  (nicknames) is roughly four times larger and carries weaker identity evidence. Ambiguity goes to a
+  human via `NAME_MISMATCH` rather than into the verified set phase 2 acts on.
+- **Candidates are not sorted by `contactAccuracyScore`.** That score measures ZoomInfo's confidence
+  in a profile's own data quality, not whether the profile is the person being searched for — it
+  cannot separate two same-named people at one company any better than relevance can. The default
+  `-relevance` order stands and multi-match rows are flagged in `Tool Notes` instead.
+- **`NOT_FOUND` is distinct from `INACTIVE`.** A missing or misspelled company produces an empty
+  response, identical in shape to "this person left" — same result, opposite meaning. Keeping them
+  apart is what stops the tool from reporting good contacts as dead.
+- **Enrich is a separate subcommand.** Contact Enrich is ZoomInfo's billable tier; an explicit
+  command with its own required `--worksheet` can never fire as a side effect of `search`. One
+  `cli.ts` routes both, validates at the boundary and owns the single top-level catch; workflow
+  modules trust their inputs and communicate failure by throwing.
+- **Phase 2 keys on `personId`.** Enrich accepts a person ID as match input, making phase 2 an exact
+  lookup. Keying on anything else would redo phase 1's matching from scratch and could reach a
+  *different* answer than phase 1 did — against records it then overwrites.
+- **Rejected candidates are surfaced, not guessed at.** `NAME_MISMATCH` rows keep the first rejected
+  candidate's details in W–Z plus a formatted list in AB, so a reviewer who confirms the person has
+  the ID in hand with no re-search. That ID is unverified by definition, which is safe only because
+  phase 2 consumes `ACTIVE` rows exclusively.
+- **Search appends; enrich overwrites.** Search's columns are new, so they are addressed by fixed
+  letters and written unconditionally; enrich's targets are pre-existing Salesforce columns, found
+  by header name and written only when ZoomInfo returned a value.
+- **No phone fallback, no DoNotCall handling.** Search falls back to email only.
+  `directPhoneDoNotCall` / `mobilePhoneDoNotCall` are never requested or checked, and phone and
+  mobile are written whenever returned — the manual process this tool replaces did not gate on the
+  DNC flag either, and enforcement belongs to Salesforce's DNC settings once the sheet is reloaded.
 
-- What it does and what the five statuses mean (`ACTIVE` / `INACTIVE` / `NAME_MISMATCH` /
-  `NOT_FOUND` / `ERROR`), including that `NAME_MISMATCH` is a human-review queue, not a verdict
-- How to get ZoomInfo credentials and what goes in `.env`
-- How to run each phase
-- **What to do when the column names in a future spreadsheet don't match** — the most likely reason
-  it breaks for the next person
+---
 
-> **Written (2026-08-05).** `README.md` now covers all four points: a status table with a
-> per-bucket "who resolves it" column, credential setup, run instructions, and a troubleshooting
-> table led by the missing-column case (the four required headers are matched by name — any casing,
-> any position). Keep the README current whenever a flag, column, or status changes — it, not this
-> file, is what the next operator reads first.
+## 8. Known limitations
 
-> **Extended (2026-08-11).** Now that phase 2 is real, the README grew a full `## Phase 2: enrich`
-> section (usage, the in-place column-overwrite behavior, the DoNotCall decision, and a table of the
-> `Tool Notes` match-status values a reviewer might see), plus an updated cache section (two files,
-> one per command) and project-layout tree. `cli.ts`'s `--help` text and `main()`'s docstring no
-> longer claim `enrich` throws. README and this file should now be in sync as of 2026-08-11 — if a
-> future change touches one, touch the other.
+**Company names do not match across systems** — the main soft spot. `Acme Corp` · `Acme Corporation`
+· `Acme Corp.` · `ACME`: Salesforce and ZoomInfo disagree, and a strict compare marks an active
+contact `INACTIVE`. `normalizeCompanyName` absorbs casing, `.`/`,` and eight suffix tokens; it
+cannot bridge abbreviations, rebrands or parent/subsidiary naming, and the residual
+false-`INACTIVE` population is too large to eyeball. The mitigation lives in the data rather than
+the code: column X carries ZoomInfo's company name and Y its `company.id`, so an adjudication pass
+can diff the input `Account Name` (I) against X with Y as a ground-truth tiebreaker. Such a pass
+should escalate ambiguous cases to a human rather than auto-recover, so a genuine job change is not
+silently promoted back into the `ACTIVE` set; a recovered row already carries its `personId`.
+
+- **Cache staleness after a logic change.** Cached verdicts are served verbatim and carry no version
+  stamp, so changing matching logic — normalization, fallback, name rules, enrich output fields —
+  requires deleting the relevant `.store` file or running with `--fresh`. Elapsed time is also a
+  reason: ZoomInfo's data drifts on its own schedule.
+- **The cache only persists at end of run.** `saveCache` runs once, after `Promise.all` settles, so
+  killing a run partway loses every result it gathered, including completed API calls. Let a run
+  finish — even a buggy one, if it is not actively corrupting data.
+- **The search cache key omits email.** Two rows with the same name and company but different emails
+  can legitimately get different answers via the fallback; the key collapses them to whichever was
+  cached last, so a warm run can differ from a cold run by a row or two. Adding `email` to
+  `buildSearchCacheKey` is the fix if exact cold/warm reproducibility is needed.
+- **`NOT_FOUND` is an upper bound.** It asserts only that name+company and the email fallback both
+  came back empty; rows with no email get one attempt.
+- **Responses are `as`-cast, never validated.** A malformed or error-shaped 200 body flows through
+  as if it matched the declared type; the first property access downstream is where it fails.
+  `getCached`'s cast is likewise unchecked, and `loadCache` verifies only that the parsed JSON is a
+  non-null object. Search reads whatever the default page returns; enrich reads only `data[0]`.
+- **A `LIMIT_EXCEEDED` enrich response that also lacks `attributes`** takes the guard branch, which
+  caches unconditionally, so it is stored under that `personId` and replayed by a later
+  non-`--fresh` run.
+- **Enrich's output-column check runs late.** `writeEnrichResults` calls `requireColumns` inside the
+  mutate callback, so a missing `email` / `title` / `phone` / `mobile` / `tool notes` header fails
+  the run *after* every API call has been spent and after the cache has been saved.
+- **Output filenames interpolate the worksheet name only**, never the input filename, so two input
+  workbooks with the same tab name overwrite each other's output.
+- **The built-in `--help` text is out of sync with the code.** It advertises three search statuses
+  (`ACTIVE` / `INACTIVE` / `NOT_FOUND`) where `search.ts` produces five, and describes enrich as
+  pulling title/email/phone where the code also pulls `mobilePhone`.
+- **Smaller edges.** The `inputPath === outputPath` guard is plain string equality, so two spellings
+  of one path slip through. Duplicate header text in row 1 resolves to the last matching column.
+  `names.csv` is committed for a future nickname rule but nothing in `src/` reads it.
