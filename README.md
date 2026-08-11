@@ -3,10 +3,13 @@
 Audits a Salesforce contact export against ZoomInfo and flags each contact's employment status,
 so a human only has to review the ambiguous cases instead of searching every name by hand.
 
-You give it an `.xlsx` export and a worksheet tab name. It searches every row against ZoomInfo's
-Contact Search API, verifies each candidate's identity strictly (exact first + last name), and
-writes an annotated copy of the sheet with a status per row. It never modifies your input file,
-never touches Salesforce, and never overwrites an existing column.
+You give it an `.xlsx` export and a worksheet tab name, and run one of two commands. `search`
+checks every row against ZoomInfo's Contact Search API, verifies each candidate's identity
+strictly (exact first + last name), and writes an annotated copy of the sheet with a status per
+row — it never overwrites an existing column. `enrich` takes the confirmed `ACTIVE` rows from
+that sheet and updates their phone/email/title fields by ZoomInfo person ID — an exact lookup, no
+re-matching — writing straight into your original columns so the result is ready to reload into
+Salesforce. Neither command modifies your input file or touches Salesforce directly.
 
 **Design rationale and code-flow diagram:** [docs/architecture.md](docs/architecture.md)
 
@@ -19,11 +22,12 @@ never touches Salesforce, and never overwrites an existing column.
 | Searches every contact by name + company, with an email fallback | Adjudicate `INACTIVE` rows where the company names just differ in spelling |
 | Rejects any candidate whose name isn't an exact match | Hand off `NAME_MISMATCH` and `NOT_FOUND` rows for manual review — one bucket for reviewers, but each keeps its own status |
 | Flags each row `ACTIVE` / `INACTIVE` / `NAME_MISMATCH` / `NOT_FOUND` / `ERROR` | Treat the `NOT_FOUND` count as an upper bound, not a verdict |
-| Captures the ZoomInfo person ID, current company, and job title for every match | Filter confirmed `ACTIVE` rows into `verified.xlsx` — the input for phase 2 (enrich) |
+| Captures the ZoomInfo person ID, current company, and job title for every match | Confirm `ACTIVE` rows (and any recovered `NAME_MISMATCH`/`INACTIVE` rows) before handing the sheet to `enrich` |
+| Pulls current phone / email / job title by ZoomInfo person ID and writes them straight into your original columns | Load the result into Salesforce — the tool never touches Salesforce itself |
 
-The strictness is deliberate: phase 2 will update Salesforce records by ZoomInfo person ID, so a
-wrong-person match doesn't just mislabel a row — it corrupts a real contact's data. The tool fails
-toward the cheap error (a human review) rather than the expensive one (a bad record).
+The strictness in `search` is deliberate: `enrich` updates real contact fields by ZoomInfo person
+ID, so a wrong-person match doesn't just mislabel a row — it corrupts a real contact's data. The
+tool fails toward the cheap error (a human review) rather than the expensive one (a bad record).
 
 ---
 
@@ -72,7 +76,7 @@ which belongs to the CRM, not this tool. The results are appended in new columns
 | Col | Header | What it holds |
 | --- | --- | --- |
 | V | `Inferred Contact Status` | The verdict — see the status table below |
-| W | `ZoomInfo Person ID` | The key phase 2 will enrich by. Stored as text — **don't** reformat it as a number (Excel will mangle it into `1.4E+10`) |
+| W | `ZoomInfo Person ID` | The key `enrich` looks up by. Stored as text — **don't** reformat it as a number (Excel will mangle it into `1.4E+10`) |
 | X | `ZoomInfo Company Name` | The person's *current* employer per ZoomInfo |
 | Y | `ZoomInfo Company ID` | Ground-truth company identifier, for company-name adjudication |
 | Z | `ZoomInfo Title` | Current job title (free with search) |
@@ -83,38 +87,77 @@ which belongs to the CRM, not this tool. The results are appended in new columns
 
 | Status | Meaning | What to do |
 | --- | --- | --- |
-| `ACTIVE` | Identity verified, still at the company in your sheet | Nothing — this row is done. Goes into `verified.xlsx` |
+| `ACTIVE` | Identity verified, still at the company in your sheet | Nothing to review — this row is ready for `enrich` as-is |
 | `INACTIVE` | Identity verified, but ZoomInfo shows a *different* current employer | Review: compare `Account Name` (I) against `ZoomInfo Company Name` (X). Company names differ across systems (`Acme Corp` vs `Acme Corporation`), so some of these are false — an AI-assisted diff pass is the plan of record (see architecture §4). A recovered row already has its person ID |
 | `NAME_MISMATCH` | ZoomInfo returned candidates, but none matched the name exactly (nicknames land here on purpose: `Mike` vs `Michael`) | Reviewed together with the `NOT_FOUND` bucket (handed off to other reviewers), but kept as its own status so the rows stay identifiable. For the reviewer: compare column AB against the row's name; if it's the same person, change **column V** to `ACTIVE` — columns W–Z already hold that candidate's details. Never edit Salesforce's own columns |
 | `NOT_FOUND` | Nothing came back from name+company *or* the email fallback | Manual / LinkedIn review. Treat as an upper bound, not a verdict — rows with no email address only got one search attempt |
 | `ERROR` | A request failed; the message is in `Tool Notes` (AA) | Re-run the same command. Errors aren't cached but successes are, so a re-run only retries the failures |
 
-**After review:** filter the confirmed `ACTIVE` rows into `verified.xlsx`. That file is the input
-contract for phase 2 — nothing reaches enrichment without either passing the exact-name check or
-being explicitly confirmed by a person.
+**Before enrichment:** make sure every row you want enriched is actually marked `ACTIVE` in column
+V — `enrich` only processes rows with status `ACTIVE` and a non-blank `ZoomInfo Person ID` (W);
+everything else is silently skipped. Nothing reaches enrichment without either passing the
+exact-name check in `search` or being explicitly flipped to `ACTIVE` by a person.
 
 ## The cache
 
-Every successful lookup is cached in `data/cache/cache.store` (keyed by name + company). This is
-what makes re-runs cheap: if a run dies at row 2,700, fixing the problem and re-running costs zero
-API calls for the rows already done.
+Every successful lookup is cached, keyed differently per command:
 
-**Delete the cache file** before re-running if:
+| Command | Cache file | Keyed by |
+| --- | --- | --- |
+| `search` | `data/cache/search_cache.store` | name + company |
+| `enrich` | `data/cache/enrich_cache.store` | ZoomInfo person ID |
 
-- you changed any matching logic (normalization, fallback, name rules) — stale verdicts are
-  otherwise served verbatim, or
+This is what makes re-runs cheap: if a run dies partway through (or, for `enrich`, hits a bug on
+some rows), fixing the problem and re-running costs zero API calls for the rows already cached.
+Errors are never cached, so a re-run only retries the rows that failed.
+
+**Delete the relevant cache file** before re-running if:
+
+- you changed any matching/enrichment logic (normalization, fallback, name rules, output fields) —
+  stale verdicts are otherwise served verbatim, or
 - enough time has passed that you want fresh answers from ZoomInfo.
 
-## Phase 2: enrich (not built yet)
+## Phase 2: enrich
 
 ```
-npm run dev -- enrich <file>     # currently throws, on purpose
+npm run dev -- enrich data/input/ContactExport.xlsx --worksheet ACTIVE
 ```
 
-The planned second phase reads `verified.xlsx` and pulls each contact's current **phone, email,
-and job title** by ZoomInfo person ID — an exact lookup, no re-matching. It's a separate explicit
-subcommand so it can never fire by accident: Contact Enrich is ZoomInfo's billable tier, and an
-accidental run burns credits. Until it's built, the `enrich` command throws.
+Reads the given tab, keeps only rows already marked `ACTIVE` with a ZoomInfo Person ID, and looks
+each one up by that ID via ZoomInfo's Contact Enrich endpoint — an exact lookup, no re-matching.
+It's a separate explicit subcommand so it can never fire by accident: Contact Enrich is ZoomInfo's
+billable tier, and an accidental run burns credits.
+
+**Unlike `search`, `enrich` overwrites your original columns** — `Email`, `Title`, `Phone`, and
+`Mobile` are updated in place with ZoomInfo's current values (located by header name, not fixed
+column letters), so the output is ready to reload into Salesforce as-is. Only fields ZoomInfo
+actually returns are written; a field it doesn't return is left untouched, so no cell is ever
+blanked. Each written cell gets a light-orange highlight so a reviewer can see exactly what
+changed. `Tool Notes` (AA) is appended to (with a ` | ` separator) rather than overwritten, so a
+note left by `search` survives alongside anything `enrich` adds.
+
+DoNotCall flags (`directPhoneDoNotCall` / `mobilePhoneDoNotCall`) are **not** checked — every
+number ZoomInfo returns gets written. That's a deliberate choice: the manual audit process never
+considered the DNC flag either, and enforcement belongs to Salesforce's own DNC settings once the
+sheet is loaded back in, not to this tool.
+
+Output: `data/output/enriched_<tab>.xlsx`.
+
+### Notes you may see in the `Tool Notes` column
+
+ZoomInfo's match status is only noted when it isn't a full, clean match — most rows get no note at
+all. Two different situations produce a note:
+
+| Note | Meaning | Are Email/Title/Phone/Mobile updated? |
+| --- | --- | --- |
+| `CONTACT_ONLY_MATCH` (and similar non-`FULL_MATCH` statuses) | ZoomInfo matched the person but flagged the match as less than fully confident | Yes — fields are written, note is just informational |
+| `NO_MATCH` | ZoomInfo can no longer resolve this person ID — the record was likely merged, deduplicated, or retired since `search` ran | No — row is left as-is |
+| `OPT_OUT` | The person opted out of ZoomInfo's data collection | No — row is left as-is |
+| `Error during enrichment: ...` | The API request itself failed | No — not cached, so a re-run retries it automatically |
+
+None of these indicate a problem with the tool or with the person ID captured during `search` —
+ZoomInfo's underlying data simply changes over time. A handful out of a few thousand rows is
+normal churn, not something to chase down.
 
 ## Troubleshooting
 
@@ -126,7 +169,8 @@ accidental run burns credits. Until it's built, the `enrich` command throws.
 | `401` errors | Bad or expired credentials in `.env` |
 | `429` errors | Rate limit. The built-in throttle normally prevents this — if it appears, something else is sharing the ZoomInfo account's quota. Wait and re-run |
 | Person IDs display as `1.40628E+10` | Column W was reformatted as a number. The tool writes IDs as text; undo the formatting or re-run |
-| Results look wrong after a code change | Stale cache — delete `data/cache/cache.store` and re-run |
+| Results look wrong after a code change | Stale cache — delete `data/cache/search_cache.store` (or `enrich_cache.store`) and re-run |
+| `enrich` skips rows you expected it to process | Row isn't marked `ACTIVE` in column V, or `ZoomInfo Person ID` (W) is blank — both are required |
 
 ## Project layout
 
@@ -134,10 +178,11 @@ accidental run burns credits. Until it's built, the `enrich` command throws.
 src/
 ├── cli.ts        # entry point: arg parsing, subcommand routing, top-level error handling
 ├── search.ts     # phase 1 workflow: per-contact search, status derivation
+├── enrich.ts     # phase 2 workflow: per-contact enrich by ZoomInfo person ID
 ├── auth.ts       # ZoomInfo token exchange + in-memory token cache
-├── zoominfo.ts   # Contact Search API client + request-level rate throttle
-├── excel.ts      # sheet reading (header-keyed) and annotated-output writing
-└── cache.ts      # JSON result cache keyed by name+company
+├── zoominfo.ts   # Contact Search + Contact Enrich API clients + request-level rate throttle
+├── excel.ts      # sheet reading (header-keyed), annotated-output writing, enrich write-back
+└── cache.ts      # JSON result cache, shared file format for both search and enrich results
 names.csv         # nickname → formal-name lookup, for a future nickname-matching rule (unused today)
 ```
 

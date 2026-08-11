@@ -15,17 +15,18 @@ Commands:
   enrich <inputFile>   Pull current title/email/phone for verified contacts
 
 Options:
-  -w, --worksheet      Worksheet tab to audit (required for search)
+  -w, --worksheet      Worksheet tab to read (required for both search and enrich)
   -h, --help           Show this help message
 
 Example:
   npm run dev -- search data/input/contacts.xlsx --worksheet Carter
+  npm run dev -- enrich data/input/contacts.xlsx --worksheet ACTIVE
 `
 
 /**
- * CLI entry point. Parses argv and routes the subcommand: `search <file>` runs the audit (after
- * checking the file exists), `enrich` throws until phase 2 is built, and `--help` or no args prints
- * usage.
+ * CLI entry point. Parses argv and routes the subcommand: `search <file>` runs the audit, `enrich
+ * <file>` pulls current phone/email/title for ACTIVE rows (after checking the file exists for
+ * either), and `--help` or no args prints usage.
  * @throws Error on an unknown command, a missing input file, or a nonexistent input path.
  */
 const main = async () => {
