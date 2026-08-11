@@ -43,10 +43,10 @@ const processEnrichContact = async (contact: EnrichRow): Promise<EnrichResult> =
         }
         // No cached result, call ZoomInfo Enrich endpoint
         const result = await contactEnrich({ personId: contact.personId });
-        if (result.data.length === 0) {
+        if (result.data.length === 0 || !result.data[0].attributes) {
             const enrichResult: EnrichResult = {
                 rowNumber: contact.rowNumber,
-                notes: 'No enrichment data found'
+                notes: result.data[0]?.meta?.matchStatus || 'NO_DATA'
             };
             // Cache the API result
             cache.setCached(cacheKey, enrichResult);

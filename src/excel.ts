@@ -253,7 +253,11 @@ const writeEnrichResults = async (inputPath: string, outputPath: string, results
         if (result.jobTitle) writeEditedCell(row, headers.get(ENRICH_OUTPUT_COLUMNS.title)!, result.jobTitle);
         if (result.phone) writeEditedCell(row, headers.get(ENRICH_OUTPUT_COLUMNS.phone)!, result.phone);
         if (result.mobilePhone) writeEditedCell(row, headers.get(ENRICH_OUTPUT_COLUMNS.mobile)!, result.mobilePhone);
-        if (result.notes) row.getCell(headers.get(ENRICH_OUTPUT_COLUMNS.toolNotes)!).value = result.notes;
+        if (result.notes) {
+            const notesCell = row.getCell(headers.get(ENRICH_OUTPUT_COLUMNS.toolNotes)!);
+            if(notesCell.text !== '') notesCell.value = notesCell.text + ' | ' + result.notes;
+            else notesCell.value = result.notes;
+        }
     }
     await worksheet.workbook.xlsx.writeFile(outputPath);
 }
