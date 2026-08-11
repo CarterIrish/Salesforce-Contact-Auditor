@@ -11,8 +11,9 @@ Salesforce Contact Auditor
 Usage: npm run dev -- <command> <inputFile> [options]
 
 Commands:
-  search <inputFile>   Audit contacts: flag each as ACTIVE / INACTIVE / NOT_FOUND
-  enrich <inputFile>   Pull current title/email/phone for verified contacts
+  search <inputFile>   Audit contacts: flag each as ACTIVE / INACTIVE / NAME_MISMATCH /
+                       NOT_FOUND / ERROR
+  enrich <inputFile>   Pull current title/email/phone/mobile for ACTIVE rows
 
 Options:
   -w, --worksheet      Worksheet tab to read (required for both search and enrich)
@@ -26,7 +27,7 @@ Example:
 
 /**
  * CLI entry point. Parses argv and routes the subcommand: `search <file>` runs the audit, `enrich
- * <file>` pulls current phone/email/title for ACTIVE rows (after checking the file exists for
+ * <file>` pulls current phone/mobile/email/title for ACTIVE rows (after checking the file exists for
  * either), and `--help` or no args prints usage.
  * @throws Error on an unknown command, a missing input file, or a nonexistent input path.
  */

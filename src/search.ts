@@ -115,7 +115,7 @@ const processContact = async (contact: SearchRow, fresh?: boolean): Promise<Sear
   try {
     // Cache is keyed by name+company only. A hit reuses ZoomInfo's answer but must be re-stamped
     // with THIS contact's rowNumber - the cached rowNumber belongs to whichever row first populated
-    // the key, and reusing it would misplace (or blank) duplicate-name rows on write. See §5.
+    // the key, and reusing it would misplace (or blank) duplicate-name rows on write.
     let cacheKey = cache.buildSearchCacheKey(contact.firstName, contact.lastName, contact.company);
     let cachedContact = cache.getCached<SearchResult>(cacheKey);
     if (!fresh && cachedContact) {
