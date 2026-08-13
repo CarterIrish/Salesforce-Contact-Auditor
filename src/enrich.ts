@@ -49,6 +49,20 @@ const deriveCachedStatus = (result: EnrichResult): EnrichStatus => {
 }
 
 /**
+ * Caches a result unless it is a credit-limit failure. LIMIT_EXCEEDED means the account ran out of
+ * credits, not that this person has no data, so caching it would pin an empty result to that
+ * personId and every later run would serve it instead of retrying, until someone passes --fresh or
+ * edits the store by hand. Both response branches route through here so the rule cannot drift.
+ * @param key The enrich cache key for this person.
+ * @param result The result to store.
+ */
+const cacheUnlessCreditLimited = (key: string, result: EnrichResult): void => {
+    if (result.status !== 'LIMIT_EXCEEDED') {
+        cache.setCached(key, result);
+    }
+}
+
+/**
  * Resolves one contact's current details: returns a cached result if present, otherwise calls
  * ZoomInfo Contact Enrich by person ID. A response can carry a matchStatus with no attributes
  * object at all, so a non-empty response does not imply fields came back. Never throws - failures
@@ -75,7 +89,7 @@ const processEnrichContact = async (contact: EnrichRow, fresh?: boolean): Promis
                 status: matchStatus === 'LIMIT_EXCEEDED' ? 'LIMIT_EXCEEDED' : 'NO_DATA',
                 notes: matchStatus || 'NO_DATA'
             };
-            cache.setCached(cacheKey, enrichResult);
+            cacheUnlessCreditLimited(cacheKey, enrichResult);
             return enrichResult;
         }
         const enrichData = result.data[0].attributes;
@@ -90,12 +104,7 @@ const processEnrichContact = async (contact: EnrichRow, fresh?: boolean): Promis
             mobilePhone: enrichData.mobilePhone,
             notes: matchStatus === 'FULL_MATCH' ? undefined : matchStatus
         };
-        // LIMIT_EXCEEDED means the account ran out of credits, not that this person has no data.
-        // Caching it would pin an empty result to this personId, and every later run would serve
-        // that instead of retrying, until someone passes --fresh or edits the store by hand.
-        if (matchStatus !== 'LIMIT_EXCEEDED') {
-            cache.setCached(cacheKey, enrichResult);
-        }
+        cacheUnlessCreditLimited(cacheKey, enrichResult);
         return enrichResult;
     } catch (error) {
         console.error(`Error processing contact: ${error}`);

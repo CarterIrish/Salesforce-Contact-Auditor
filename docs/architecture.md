@@ -317,12 +317,15 @@ ZoomInfo returns a record carrying a `meta.matchStatus` but **no `attributes` ob
 several match statuses, so a non-empty array does not imply fields are present.
 
 - **Guard taken:** no fields written; `notes` becomes `data[0]?.meta?.matchStatus || 'NO_DATA'`,
-  `status` becomes `LIMIT_EXCEEDED` when the match status is that, otherwise `NO_DATA`, and the
-  result is cached unconditionally.
+  `status` becomes `LIMIT_EXCEEDED` when the match status is that, otherwise `NO_DATA`.
 - **Guard not taken:** the four fields below are copied out individually, and `notes` becomes the
   `matchStatus` unless it is `'FULL_MATCH'`, in which case `notes` is `undefined` so the ordinary
   success case leaves `Tool Notes` untouched. `COMPANY_ONLY_MATCH` and `CONTACT_ONLY_MATCH` are
-  noted like any other non-`FULL_MATCH` value. Cached unless the status is `LIMIT_EXCEEDED`.
+  noted like any other non-`FULL_MATCH` value.
+
+Both branches persist through `cacheUnlessCreditLimited`, which stores everything except a
+`LIMIT_EXCEEDED` result. Caching one would pin an empty result to that `personId` and every later
+run would replay it instead of retrying, so the rule lives in one place rather than at each branch.
 
 | API attribute | `EnrichResult` field | Destination column (by header) |
 | --- | --- | --- |
@@ -488,9 +491,6 @@ silently promoted back into the `ACTIVE` set; a recovered row already carries it
   as if it matched the declared type; the first property access downstream is where it fails.
   `getCached`'s cast is likewise unchecked, and `loadCache` verifies only that the parsed JSON is a
   non-null object. Search reads whatever the default page returns; enrich reads only `data[0]`.
-- **A `LIMIT_EXCEEDED` enrich response that also lacks `attributes`** takes the guard branch, which
-  caches unconditionally, so it is stored under that `personId` and replayed by a later
-  non-`--fresh` run.
 - **Enrich's output-column check runs late.** `writeEnrichResults` calls `requireColumns` inside the
   mutate callback, so a missing `email` / `title` / `phone` / `mobile` / `tool notes` header fails
   the run *after* every API call has been spent and after the cache has been saved.
