@@ -1,5 +1,9 @@
 # Salesforce Contact Auditor
 
+> **Source of truth:** https://github.com/CarterIrish/Salesforce-Contact-Auditor
+> If you're reading this from a ZIP copy, that repo has the current code and docs — this copy is a
+> snapshot from whenever it was downloaded.
+
 This tool audits a Salesforce contact export against ZoomInfo and flags each contact's employment status,
 so a human only has to review the ambiguous cases instead of searching every name by hand.
 

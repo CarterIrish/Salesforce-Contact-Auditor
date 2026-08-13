@@ -3,6 +3,9 @@
 A single-operator TypeScript CLI: two phases, each its own subcommand, each its own process. This
 document explains the code; `README.md` is the operator's guide and is not repeated here.
 
+> **Source of truth:** https://github.com/CarterIrish/Salesforce-Contact-Auditor — a ZIP copy of
+> this document is a snapshot; the repo has the current version.
+
 ---
 
 ## 1. Overview
