@@ -78,7 +78,7 @@ Your original columns (A–U) are untouched during the `-- search` operation. Th
 | Col | Header | What it holds |
 | --- | --- | --- |
 | V | `Inferred Contact Status` | The verdict — see the status table below |
-| W | `ZoomInfo Person ID` | The key `enrich` looks up by. Stored as text — **don't** reformat it as a number (Excel will mangle it into `1.4E+10`) |
+| W | `ZoomInfo Person ID` | The key `enrich` looks up by. Stored as text — **don't** reformat it as a number (Excel will mangle it into `1.2E+10`) |
 | X | `ZoomInfo Company Name` | The person's *current* employer per ZoomInfo |
 | Y | `ZoomInfo Company ID` | The internal ZoomInfo ID for a requested company. Useful with manual API lookups. |
 | Z | `ZoomInfo Title` | Current job title (free with search) |
@@ -169,7 +169,7 @@ normal churn, not something to chase down.
 | Write fails at the end of a run | The output file is probably open in Excel. Close it and re-run — the cache makes the re-run free |
 | `401` errors | Bad or expired credentials in `.env` |
 | `429` errors | Rate limit. The built-in throttle normally prevents this — if it appears, something else is sharing the ZoomInfo account's quota. Wait and re-run |
-| Person IDs display as `1.40628E+10` | Column W was reformatted as a number. The tool writes IDs as text; undo the formatting or re-run |
+| Person IDs display as `1.23457E+10` | Column W was reformatted as a number. The tool writes IDs as text; undo the formatting or re-run |
 | Results look wrong after a code change | Stale cache — delete `data/cache/search_cache.store` (or `enrich_cache.store`) and re-run |
 | `enrich` skips rows you expected it to process | Row isn't marked `ACTIVE` in column V, or `ZoomInfo Person ID` (W) is blank — both are required |
 

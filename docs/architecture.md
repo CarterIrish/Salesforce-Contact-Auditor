@@ -85,7 +85,7 @@ runtime imports:                              type-only (erased at compile time,
 
 | Module | Responsibility | Key exports |
 | --- | --- | --- |
-| `cli.ts` | Parses argv, validates command/file/worksheet, dispatches, owns the single `.catch` and exit code. | none — runs `main().catch(...)` at module scope |
+| `cli.ts` | Prints a three-line startup banner, parses argv, validates command/file/worksheet, dispatches, owns the single `.catch` and exit code. `--help` or no positionals prints usage and returns, exiting 0. | none — runs `main().catch(...)` at module scope |
 | `search.ts` | Phase 1 orchestration and every phase 1 rule: acceptance, normalization, status. | `runSearch` (also default export), `SearchResult` |
 | `enrich.ts` | Phase 2 orchestration: cache lookup, enrich call, response interpretation, per-row error containment. | `runEnrich` |
 | `zoominfo.ts` | Typed client for both endpoints; owns the throttle. | `contactSearch`, `contactEnrich`, the request/response interfaces, `ContactEnrichMatchStatus` |
@@ -158,7 +158,8 @@ so an unrecognized option throws out of `parseArgs`.
 `first name`, `last name`, `account name`, `email` — lookup by header rather than by fixed letter,
 because the real export hides columns. Every data row (2..`rowCount`) is returned, unfiltered; names
 and company are read with `cell.value?.toString() ?? ''`, email with `cell.text`, which always
-yields a string.
+yields a string. The sheet is built by hand upstream, so every data row is assumed to carry all four
+values — the code enforces the four *headers*, never their contents.
 
 Layout of a contact tab in the real export (`B`, `E`, `K` are hidden in Excel, read normally through
 ExcelJS). `search` never modifies A–U, including `L` (`Contact Status`), a CRM-managed field; V
@@ -257,7 +258,7 @@ otherwise resolve ambiguously.
 | V | `Inferred Contact Status` | `result.status` |
 | W | `ZoomInfo Person ID` | `result.personId ?? ''` — phase 2's key |
 | X | `ZoomInfo Company Name` | `result.zi_company ?? ''` — lets a human sanity-check every `INACTIVE` |
-| Y | `ZoomInfo Company ID` | `result.zi_company_id?.toString() ?? ''` — as text; Excel renders a long all-digit value as `1.40628E+10` when the cell is numeric |
+| Y | `ZoomInfo Company ID` | `result.zi_company_id?.toString() ?? ''` — as text; Excel renders a long all-digit value as `1.23457E+10` when the cell is numeric |
 | Z | `ZoomInfo Title` | `result.zi_title ?? ''` — free with search |
 | AA | `Tool Notes` | `result.notes ?? ''` |
 | AB | `ZoomInfo Rejected Candidates` | `result.rejectedCandidates ?? ''` |
@@ -293,7 +294,7 @@ against a raw Salesforce export.**
   "data": {
     "type": "ContactEnrich",
     "attributes": {
-      "matchPersonInput": [{ "personId": 14062844524 }],   // one element, never batched
+      "matchPersonInput": [{ "personId": 12345678901 }],   // one element, never batched
       "outputFields": ["email", "mobilePhone", "phone", "jobTitle"]
     }
   }
@@ -347,10 +348,10 @@ none of the four counts as no-data.
 
 **Auth.** `auth.ts` runs the OAuth 2.0 client-credentials flow:
 `POST https://api.zoominfo.com/gtm/oauth/v1/token`, `Authorization: Basic
-base64(CLIENT_ID:CLIENT_SECRET)`, `Content-Type: application/x-www-form-urlencoded`, body
-`grant_type=client_credentials`. Credentials come from `process.env`, populated by `cli.ts`'s
-`import 'dotenv/config'`. Three module-level variables — `cachedToken`, `cachedTokenExpiresAt`,
-`pendingFetch` — form a single-flight cache for the process. Expiry is
+base64(CLIENT_ID:CLIENT_SECRET)`, `Content-Type: application/x-www-form-urlencoded`, `Accept:
+application/json`, body `grant_type=client_credentials`. Credentials come from `process.env`,
+populated by `cli.ts`'s `import 'dotenv/config'`. Three module-level variables — `cachedToken`,
+`cachedTokenExpiresAt`, `pendingFetch` — form a single-flight cache for the process. Expiry is
 `Date.now() + expires_in*1000 - 60_000` (`EXPIRY_SAFETY_MARGIN_MS`), `expires_in` defaulting to
 `3600` when absent. `pendingFetch` is assigned synchronously before any await, so under a
 `Promise.all` fan-out the first caller starts the POST and every other joins the same promise
@@ -452,7 +453,7 @@ catches its own error, so a total outage yields a complete output workbook in wh
 
 **Company names do not match across systems** — the main soft spot. `Acme Corp` · `Acme Corporation`
 · `Acme Corp.` · `ACME`: Salesforce and ZoomInfo disagree, and a strict compare marks an active
-contact `INACTIVE`. `normalizeCompanyName` absorbs casing, `.`/`,` and eight suffix tokens; it
+contact `INACTIVE`. `normalizeCompanyName` absorbs casing, `.`/`,` and eight whole-word tokens; it
 cannot bridge abbreviations, rebrands or parent/subsidiary naming, and the residual
 false-`INACTIVE` population is too large to eyeball. The mitigation lives in the data rather than
 the code: column X carries ZoomInfo's company name and Y its `company.id`, so an adjudication pass
@@ -485,6 +486,10 @@ silently promoted back into the `ACTIVE` set; a recovered row already carries it
   the run *after* every API call has been spent and after the cache has been saved.
 - **Output filenames interpolate the worksheet name only**, never the input filename, so two input
   workbooks with the same tab name overwrite each other's output.
+- **The startup banner's version is populated only under npm.** `cli.ts` reads
+  `process.env.npm_package_version`, which npm sets for `npm start` / `npm run dev` but not for a
+  bare `node dist/cli.js`; that path prints `Version: undefined`. Not addressed — reading the
+  version from `package.json` would fix it.
 - **Smaller edges.** The `inputPath === outputPath` guard is plain string equality, so two spellings
   of one path slip through. Duplicate header text in row 1 resolves to the last matching column.
   `names.csv` is committed for a future nickname rule but nothing in `src/` reads it.
