@@ -29,11 +29,30 @@ Example:
 // Resolves from both src/ (tsx) and dist/ (compiled), which sit one level below the package root.
 const { version } = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8'));
 
+// Marks the failures a user can fix by retyping the command. Only these print USAGE, so a 401 or a
+// locked output file surfacing minutes into a run isn't buried under twenty lines of help text.
+class UsageError extends Error { }
+
+/**
+ * Parses argv, restating anything parseArgs rejects (an unknown option, a missing option value) as
+ * a UsageError so it prints the usage text like the checks below it.
+ * @param args Raw argv, less the node and script entries.
+ */
+const parseCliArgs = (args: string[]) => {
+  try {
+    return parseArgs({ args, options: { help: { type: 'boolean', short: 'h' }, worksheet: { type: 'string', short: 'w' }, fresh: { type: 'boolean', short: 'f' } }, allowPositionals: true });
+  } catch (err) {
+    throw new UsageError(err instanceof Error ? err.message : String(err));
+  }
+}
+
 /**
  * CLI entry point. Parses argv and routes the subcommand: `search <file>` runs the audit, `enrich
- * <file>` pulls current phone/mobile/email/title for ACTIVE rows (after checking the file exists for
- * either), and `--help` or no args prints usage.
- * @throws Error on an unknown command, a missing input file, or a nonexistent input path.
+ * <file>` pulls current phone/mobile/email/title for ACTIVE rows, and `--help` or no args prints
+ * usage. Both commands take the same three arguments, so they are validated once before dispatch.
+ * @throws UsageError on an unknown command, a missing or nonexistent input file, a missing
+ * --worksheet, or an option parseArgs rejects. Whatever a phase throws — auth, API, workbook I/O —
+ * propagates unchanged.
  */
 const main = async () => {
   console.log(`Salesforce Contact Auditor | Version: ${version}`);
@@ -41,46 +60,37 @@ const main = async () => {
   console.log('---------------------------------------- \n \n');
 
   const args = process.argv.slice(2);
-  const { values, positionals } = parseArgs({ args, options: { help: { type: 'boolean', short: 'h' }, worksheet: { type: 'string', short: 'w' }, fresh: { type: 'boolean', short: 'f' } }, allowPositionals: true });
+  const { values, positionals } = parseCliArgs(args);
   if (values.help || positionals.length === 0) {
     console.log(USAGE);
     return;
   }
 
   const [command, inputFile] = positionals;
-  switch (command) {
-    case 'search':
-      if (!inputFile) {
-        throw new Error('Input file is required for the search command.');
-      }
-      if (!existsSync(inputFile)) {
-        throw new Error(`Input file "${inputFile}" does not exist.`);
-      }
-      if (!values.worksheet) {
-        throw new Error('The --worksheet option is required for the search command.');
-      }
-      await runSearch(inputFile, values.worksheet, values.fresh);
-      break;
-    case 'enrich':
-      if (!inputFile) {
-        throw new Error('Input file is required for the enrich command.');
-      }
-      if (!existsSync(inputFile)) {
-        throw new Error(`Input file "${inputFile}" does not exist.`);
-      }
-      if (!values.worksheet) {
-        throw new Error('The --worksheet option is required for the enrich command.');
-      }
-      await runEnrich(inputFile, values.worksheet, values.fresh);
-      break;
-    default:
-      throw new Error(`Unknown command: ${command}`);
+  if (command !== 'search' && command !== 'enrich') {
+    throw new UsageError(`Unknown command: ${command}`);
+  }
+  if (!inputFile) {
+    throw new UsageError(`Input file is required for the ${command} command.`);
+  }
+  if (!existsSync(inputFile)) {
+    throw new UsageError(`Input file "${inputFile}" does not exist.`);
+  }
+  if (!values.worksheet) {
+    throw new UsageError(`The --worksheet option is required for the ${command} command.`);
   }
 
+  if (command === 'search') {
+    await runSearch(inputFile, values.worksheet, values.fresh);
+  } else {
+    await runEnrich(inputFile, values.worksheet, values.fresh);
+  }
 }
 
 main().catch((err) => {
   console.error(err instanceof Error ? err.message : err);
-  console.log(USAGE);
+  if (err instanceof UsageError) {
+    console.log(USAGE);
+  }
   process.exit(1);
 });

@@ -144,10 +144,11 @@ flowchart TB
     CE -.-> AUTH
 ```
 
-`cli.ts` validates per branch in a fixed order — input file present, `existsSync`, then
-`--worksheet` — and rejects `--worksheet ""` like an omitted flag. Options are `--help`/`-h`,
+`cli.ts` validates once before dispatch, in a fixed order — command recognized, input file present,
+`existsSync`, then `--worksheet` — and rejects `--worksheet ""` like an omitted flag. Both commands
+take the same three arguments, so neither branch repeats the checks. Options are `--help`/`-h`,
 `--worksheet`/`-w`, `--fresh`/`-f`, with `allowPositionals: true` and Node's default `strict: true`,
-so an unrecognized option throws out of `parseArgs`.
+so an unrecognized option throws out of `parseArgs`; `parseCliArgs` restates that as a `UsageError`.
 
 ---
 
@@ -414,7 +415,7 @@ load, the cache save, the workbook write.
 | Scope | What lands there | Effect |
 | --- | --- | --- |
 | Per row | Non-OK HTTP, network or JSON-parse failure, token failure, bad criteria | `processContact` / `processEnrichContact` wrap their whole body in one `try`/`catch` that returns a value rather than rethrowing, so `Promise.all` never rejects. The row is written out as `status: 'ERROR'` with the message in `notes` (search), or with `notes` beginning `Error during enrichment: ` (enrich). `enrich.ts` also logs `Error processing contact: <error>` to stderr, with no row number or person ID. |
-| Per run | CLI validation (missing/nonexistent input file, missing `--worksheet`, unknown command, anything `parseArgs` throws); read failures (worksheet not found — the error lists the workbook's real tab names — required header missing from row 1, no data rows, unreadable workbook); write failures (`inputPath === outputPath`, missing enrich output column, unwritable workbook, typically the output file being open in Excel) | Rejects the workflow promise, reaches `main().catch` in `cli.ts`, which prints the message plus the full usage text, then `process.exit(1)`. |
+| Per run | CLI validation (missing/nonexistent input file, missing `--worksheet`, unknown command, anything `parseArgs` throws); read failures (worksheet not found — the error lists the workbook's real tab names — required header missing from row 1, no data rows, unreadable workbook); write failures (`inputPath === outputPath`, missing enrich output column, unwritable workbook, typically the output file being open in Excel, unwritable cache store) | Rejects the workflow promise, reaches `main().catch` in `cli.ts`, which prints the message and `process.exit(1)`. The usage text is appended only for a `UsageError` — the CLI-validation cases — so a 401 or a locked workbook surfacing minutes into a run is not buried under it. |
 
 **Nothing is retried anywhere** — no backoff, no 429 or 5xx handling. A non-OK response costs that
 row its result for that run, and error results are never cached in either phase, so a re-run retries
