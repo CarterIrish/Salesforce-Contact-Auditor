@@ -1,4 +1,6 @@
 import ExcelJS from 'exceljs';
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 import type { SearchResult } from './search.js';
 export interface SearchRow {
     rowNumber: number;
@@ -116,7 +118,7 @@ const getDataRows = (worksheet: ExcelJS.Worksheet): ExcelJS.Row[] => {
 /**
  * Shared write pipeline: re-opens the input workbook, hands the worksheet to `mutate`, and saves the
  * whole workbook to a separate output file, leaving untouched cells and the other tabs intact.
- * Overwrites any existing output file.
+ * Creates the output directory if it does not exist. Overwrites any existing output file.
  * @param inputPath Path to the input Excel file (read-only).
  * @param outputPath Path to the output Excel file (written).
  * @param worksheetName Name of the worksheet tab to write into - must match the tab that was read.
@@ -133,6 +135,7 @@ const writeToOutput = async (
     if (inputPath === outputPath) {
         throw new Error(`Input and output paths must be different: ${inputPath}`);
     }
+    mkdirSync(dirname(outputPath), { recursive: true });
     const worksheet = await openWorksheet(inputPath, worksheetName);
     await mutate(worksheet);
     await worksheet.workbook.xlsx.writeFile(outputPath);

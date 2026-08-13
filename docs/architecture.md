@@ -66,7 +66,8 @@ salesforce-contact-auditor/
 Node 18 or newer is required in practice because the code calls global `fetch`.
 
 **Filesystem contract.** Both cache paths and both output paths are relative, so runs start from the
-repo root. No module creates directories — `data/cache/` and `data/output/` must already exist.
+repo root. `saveCache` and `writeToOutput` each `mkdirSync` their own parent directory, so
+`data/cache/` and `data/output/` are created on demand; only `data/input/` must exist beforehand.
 
 ---
 
@@ -388,9 +389,10 @@ rests entirely on `cli.ts` running one phase per process. On-disk format is pret
 despite the `.store` extension, with no TTL, entry cap, eviction or schema version.
 
 `loadCache` runs once before the fan-out, `saveCache` once after; `setCached` only mutates memory.
-**No exported cache function can throw to its caller** — a missing, corrupt or unwritable store logs
-and degrades to a cold or discarded cache, including a missing `data/cache/` directory, where the
-run reports success having persisted nothing. `rowNumber` is re-stamped from the current row on
+`loadCache` cannot throw to its caller — a missing, corrupt or unreadable store logs and degrades to
+a cold cache. `saveCache` is the exception: it creates `data/cache/` when absent and **rethrows** any
+write failure, so a run can no longer report success having persisted nothing. `setCached` and both
+key builders are pure. `rowNumber` is re-stamped from the current row on
 every hit (`{ ...cachedContact, rowNumber: contact.rowNumber }`): both keys are per-person, so a
 cached entry's own `rowNumber` belongs to whichever row first populated the key, and reusing it
 would misplace or blank duplicate rows on write. `--fresh` skips the cache *read*, not the write — a

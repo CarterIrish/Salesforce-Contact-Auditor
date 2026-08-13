@@ -47,8 +47,9 @@ tool fails toward the cheap error (a human review) rather than the expensive one
 
    > `.env` is gitignored. Keep it that way — never commit real credentials.
 
-4. **Input file.** Place the export under `data/input/` (the whole `data/` directory is gitignored
-   because it contains real people's information). Requirements:
+4. **Input file.** Create `data/input/` and place the export there (the whole `data/` directory is
+   gitignored because it contains real people's information, so it is not in a fresh clone).
+   `data/output/` and `data/cache/` are created for you on the first run. Requirements:
    - `.xlsx` workbook; each contact list is a worksheet tab (you name the tab at run time)
    - Row 1 is a header row containing at least these headers (any casing, any column position):
      **First Name**, **Last Name**, **Account Name**, **Email**

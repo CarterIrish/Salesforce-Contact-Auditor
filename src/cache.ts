@@ -2,6 +2,7 @@ import type { SearchResult } from './search';
 import type { EnrichResult } from './excel';
 
 import fs from 'fs';
+import path from 'path';
 
 let cache: Record<string, SearchResult | EnrichResult> = {};
 
@@ -58,17 +59,21 @@ const setCached = <T extends SearchResult | EnrichResult>(key: string, value: T)
 };
 
 /**
- * Writes the in-memory cache to disk as pretty-printed JSON. A write failure logs and is swallowed.
- * A run shouldn't fail just because the cache couldn't be persisted. Call once after processing.
+ * Writes the in-memory cache to disk as pretty-printed JSON, creating the cache directory if it is
+ * missing. Call once after processing.
  * @param filePath Path to the JSON cache store.
+ * @throws Error if the cache cannot be written. Deliberately not swallowed: a silent no-op here
+ * leaves every result of the run in memory only, so a later output-write failure discards the whole
+ * run — on the enrich path, credits included.
  */
 const saveCache = (filePath: string): void => {
     try {
-        // Write the cache to the file
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
         fs.writeFileSync(filePath, JSON.stringify(cache, null, 2), 'utf-8');
         console.log(`Cache saved to "${filePath}" with ${Object.keys(cache).length} entries.`);
     } catch (err) {
         console.error(`Failed to save cache to "${filePath}": ${err}`);
+        throw err;
     }
 };
 
