@@ -312,8 +312,9 @@ Only `data[0]` is examined. The guard is `result.data.length === 0 || !result.da
 ZoomInfo returns a record carrying a `meta.matchStatus` but **no `attributes` object at all** for
 several match statuses, so a non-empty array does not imply fields are present.
 
-- **Guard taken:** no fields written; `notes` becomes `data[0]?.meta?.matchStatus || 'NO_DATA'`, and
-  the result is cached unconditionally.
+- **Guard taken:** no fields written; `notes` becomes `data[0]?.meta?.matchStatus || 'NO_DATA'`,
+  `status` becomes `LIMIT_EXCEEDED` when the match status is that, otherwise `NO_DATA`, and the
+  result is cached unconditionally.
 - **Guard not taken:** the four fields below are copied out individually, and `notes` becomes the
   `matchStatus` unless it is `'FULL_MATCH'`, in which case `notes` is `undefined` so the ordinary
   success case leaves `Tool Notes` untouched. `COMPANY_ONLY_MATCH` and `CONTACT_ONLY_MATCH` are
@@ -339,9 +340,12 @@ the exception: written directly with no fill, and *appended* — when the cell i
 note is joined with `' | '`, so a note left by search survives.
 
 `runEnrich` logs the post-filter row count and `Summary: <a> enriched, <b> no data, <c> errors`. The
-tally keys on the notes string: a note starting with `Error` counts as an error, otherwise any of
-the four fields being present counts as enriched, otherwise no-data — so a `FULL_MATCH` returning
-none of the four counts as no-data.
+tally keys on `EnrichResult.status`, a four-way union (`ENRICHED` / `NO_DATA` / `LIMIT_EXCEEDED` /
+`ERROR`) set where each result is built, so rewording a note can no longer change a count. A
+`FULL_MATCH` returning none of the four fields is still `NO_DATA`. `LIMIT_EXCEEDED` is counted
+separately and, when non-zero, printed to stderr as `RUN TRUNCATED BY CREDIT LIMIT: …` — the run
+finished but the remaining contacts are unenriched. Entries cached before `status` existed are
+classified on read by `deriveCachedStatus`, since the store carries no schema version.
 
 ---
 

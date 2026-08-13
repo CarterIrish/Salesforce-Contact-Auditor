@@ -15,9 +15,14 @@ export interface EnrichRow {
     personId: string;
 }
 
+// LIMIT_EXCEEDED is kept distinct from NO_DATA: both arrive with no usable fields, but one means
+// the account ran out of credits mid-run and the contact still needs enriching.
+export type EnrichStatus = 'ENRICHED' | 'NO_DATA' | 'LIMIT_EXCEEDED' | 'ERROR';
+
 // Field names mirror ContactEnrichAttributes so results can be built by spreading the API record.
 export interface EnrichResult {
     rowNumber: number;
+    status: EnrichStatus;
     email?: string;
     jobTitle?: string;
     phone?: string;
