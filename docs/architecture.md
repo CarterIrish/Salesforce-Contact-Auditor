@@ -116,7 +116,7 @@ flowchart TB
         SEL2 -- "none accepted" --> REJ{"any candidates<br/>returned?"}
         COMP -- yes --> ACT["ACTIVE"]
         COMP -- no --> INA["INACTIVE"]
-        REJ -- yes --> NM["NAME_MISMATCH<br/>best candidate to W-Z, list to AB"]
+        REJ -- yes --> NM["NAME_MISMATCH<br/>first candidate to W-Z, list to AB"]
         REJ -- no --> NF["NOT_FOUND"]
         ERR["ERROR — any throw in the row<br/>message to AA, never cached"] --> WRITE
         ACT --> WRITE["cache.setCached<br/>excel.writeSearchResults writes V-AB"]

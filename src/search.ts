@@ -113,7 +113,7 @@ const describeCandidates = (candidates: ContactSearchCandidate[]): string => {
  * searches by name + company, falls back to an email-only search when no candidate passed the
  * name check, and derives the status. A candidate only counts as a match when its first and last
  * name equal the sheet row's (selectMatch): an accepted match is ACTIVE / INACTIVE by company
- * compare, rejected-only candidates are NAME_MISMATCH (best candidate's details kept for review),
+ * compare, rejected-only candidates are NAME_MISMATCH (first candidate's details kept for review),
  * and zero candidates is NOT_FOUND. Never throws - failures are returned as an ERROR result.
  * @param contact The contact row to resolve.
  * @param fresh When true, skips the cache read (a fresh result is still cached, overwriting any
@@ -157,17 +157,19 @@ const processContact = async (contact: SearchRow, fresh?: boolean): Promise<Sear
       return result;
     }
 
-    // Candidates returned but none passed the name check: surface the best candidate's details
-    // for manual review. The row only reaches stage 2 if a human flips it to ACTIVE.
+    // Candidates returned but none passed the name check: surface the first candidate's details
+    // for manual review. Nothing ranks these - it is API order, so the reviewer checks the full
+    // list in column AB rather than trusting this one. The row only reaches stage 2 if a human
+    // flips it to ACTIVE.
     if (!contactMatch) {
-      const best = rejected[0];
+      const firstCandidate = rejected[0];
       const result: SearchResult = {
         rowNumber: contact.rowNumber,
         status: 'NAME_MISMATCH',
-        personId: best.id,
-        zi_company: best.attributes.company.name,
-        zi_company_id: best.attributes.company.id,
-        zi_title: best.attributes.jobTitle,
+        personId: firstCandidate.id,
+        zi_company: firstCandidate.attributes.company.name,
+        zi_company_id: firstCandidate.attributes.company.id,
+        zi_title: firstCandidate.attributes.jobTitle,
         notes: `${rejected.length} candidate(s) rejected: name mismatch.`,
         rejectedCandidates: describeCandidates(rejected)
       };
