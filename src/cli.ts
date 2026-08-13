@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { parseArgs } from 'node:util';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { runSearch } from './search';
 import { runEnrich } from './enrich';
 
@@ -25,6 +26,9 @@ Example:
   npm run dev -- enrich data/input/contacts.xlsx --worksheet ACTIVE
 `
 
+// Resolves from both src/ (tsx) and dist/ (compiled), which sit one level below the package root.
+const { version } = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8'));
+
 /**
  * CLI entry point. Parses argv and routes the subcommand: `search <file>` runs the audit, `enrich
  * <file>` pulls current phone/mobile/email/title for ACTIVE rows (after checking the file exists for
@@ -32,7 +36,7 @@ Example:
  * @throws Error on an unknown command, a missing input file, or a nonexistent input path.
  */
 const main = async () => {
-  console.log(`Salesforce Contact Auditor | Version: ${process.env.npm_package_version}`);
+  console.log(`Salesforce Contact Auditor | Version: ${version}`);
   console.log(`Node.js Version: ${process.version}`);
   console.log('---------------------------------------- \n \n');
 

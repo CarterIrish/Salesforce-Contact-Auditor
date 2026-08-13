@@ -58,7 +58,8 @@ export interface SearchResult {
 
 /**
  * Normalizes a company name for cross-system comparison: lowercases, strips periods and commas and
- * common suffixes (Inc / Corp / LLC / Ltd / Co / Company), and collapses whitespace.
+ * eight whole-word tokens (Inc / Incorporated / Corp / Corporation / LLC / Ltd / Co / Company)
+ * anywhere in the name, and collapses whitespace.
  * @param name Raw company name.
  * @returns The normalized name, suitable for an equality compare.
  */
