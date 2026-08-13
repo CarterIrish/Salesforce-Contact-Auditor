@@ -57,9 +57,17 @@ export interface SearchResult {
 }
 
 /**
- * Normalizes a company name for cross-system comparison: lowercases, strips periods and commas and
- * eight whole-word tokens (Inc / Incorporated / Corp / Corporation / LLC / Ltd / Co / Company)
- * anywhere in the name, and collapses whitespace.
+ * Normalizes a company name so a Salesforce Account Name and a ZoomInfo company name can be
+ * compared with `===`. The two systems disagree on legal-entity styling far more often than on the
+ * name itself (`Acme Corp` / `Acme Corporation` / `ACME`), so casing, `.`/`,` and the entity tokens
+ * in the pattern below are stripped before comparing. Deliberately an exact compare rather than a
+ * fuzzy one: a near-miss should fall through to human review instead of being guessed at.
+ *
+ * The pattern treats `-` as a boundary, so a name whose first word is a token followed by a hyphen
+ * loses it — `Co-Star Group` normalizes to `-star group`. That is harmless while both systems spell
+ * it the same way, because both sides mangle identically and still compare equal. It only misfires
+ * when the two disagree on the hyphen itself (`CoStar` vs `Co-Star`), costing that row a false
+ * INACTIVE.
  * @param name Raw company name.
  * @returns The normalized name, suitable for an equality compare.
  */

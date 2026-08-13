@@ -239,9 +239,12 @@ Evaluated in this order inside `processContact`:
 On `ACTIVE` / `INACTIVE` rows, `notes` is set only when `meta.totalResults > 1`, to
 `` `${totalResults} matches found; used the first name-verified one.` ``, and `rejectedCandidates`
 is never set. `normalizeCompanyName` is used **only** for the `ACTIVE` / `INACTIVE` compare — never
-for acceptance, never in the cache key: `toLocaleLowerCase()` → strip `.` and `,` → strip the
-whole-word tokens `inc`, `incorporated`, `corp`, `corporation`, `llc`, `ltd`, `co`, `company` →
-collapse whitespace → `trim()`, compared with strict `===`.
+for acceptance, never in the cache key: `toLocaleLowerCase()` → strip `.` and `,` → strip the entity
+tokens `inc`, `incorporated`, `corp`, `corporation`, `llc`, `ltd`, `co`, `company` → collapse
+whitespace → `trim()`, compared with strict `===`. The token pattern is `\b`-delimited and a hyphen
+counts as a boundary, so `Co-Star Group` normalizes to `-star group`. Both systems mangle a given
+spelling identically, so that only costs a row when they disagree on the hyphen itself (`CoStar` vs
+`Co-Star`), which reads out as a false `INACTIVE`.
 
 ### Output columns
 
@@ -459,7 +462,7 @@ catches its own error, so a total outage yields a complete output workbook in wh
 
 **Company names do not match across systems** — the main soft spot. `Acme Corp` · `Acme Corporation`
 · `Acme Corp.` · `ACME`: Salesforce and ZoomInfo disagree, and a strict compare marks an active
-contact `INACTIVE`. `normalizeCompanyName` absorbs casing, `.`/`,` and eight whole-word tokens; it
+contact `INACTIVE`. `normalizeCompanyName` absorbs casing, `.`/`,` and eight entity tokens; it
 cannot bridge abbreviations, rebrands or parent/subsidiary naming, and the residual
 false-`INACTIVE` population is too large to eyeball. The mitigation lives in the data rather than
 the code: column X carries ZoomInfo's company name and Y its `company.id`, so an adjudication pass
