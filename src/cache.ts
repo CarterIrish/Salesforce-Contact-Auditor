@@ -42,7 +42,7 @@ const loadCache = (filePath: string): void => {
 /**
  * Looks up a previously stored result by cache key. Callers must re-stamp `rowNumber` from the
  * current contact.
- * @param key Cache key from buildCacheKey().
+ * @param key Cache key from buildSearchCacheKey() or buildEnrichCacheKey().
  * @returns The cached SearchResult or EnrichResult, or undefined on a miss.
  */
 const getCached = <T extends SearchResult | EnrichResult>(key: string): T | undefined => {
@@ -91,7 +91,7 @@ const buildSearchCacheKey = (firstName: string, lastName: string, company: strin
 /**
  * Builds the cache key for enrichment results. Keyed by personId only.
  * @param personId The ZoomInfo person ID.
- * @returns Key of the form "personId".
+ * @returns Key of the form "personId:<id>".
  */
 const buildEnrichCacheKey = (personId: string): string => {
     return `personId:${personId}`;

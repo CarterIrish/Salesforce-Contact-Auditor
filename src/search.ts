@@ -1,5 +1,5 @@
 // Phase 1: read the contact sheet, check each row against ZoomInfo Contact Search,
-// derive ACTIVE / INACTIVE / NOT_FOUND, write the annotated sheet.
+// derive ACTIVE / INACTIVE / NAME_MISMATCH / NOT_FOUND / ERROR, write the annotated sheet.
 import { SearchRow, readSearchRows, writeSearchResults } from './excel';
 import { contactSearch, ContactSearchResponse, ContactSearchCandidate} from './zoominfo';
 import * as cache from './cache';
