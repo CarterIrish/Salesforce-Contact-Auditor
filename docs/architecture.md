@@ -94,7 +94,7 @@ runtime imports:                              type-only (erased at compile time,
 | `enrich.ts` | Phase 2 orchestration: cache lookup, enrich call, response interpretation, per-row error containment. | `runEnrich` |
 | `zoominfo.ts` | Typed client for both endpoints; owns the throttle. | `contactSearch`, `contactEnrich`, the request/response interfaces, `ContactEnrichMatchStatus` |
 | `auth.ts` | OAuth 2.0 client-credentials token, single-flight in-memory cache. | `getBearerToken` |
-| `excel.ts` | All workbook I/O and the column contract. | `readSearchRows`, `writeSearchResults`, `readEnrichRows`, `writeEnrichResults`, `SearchRow`, `EnrichRow`, `EnrichResult` |
+| `excel.ts` | All workbook I/O and the column contract. | `readSearchRows`, `writeSearchResults`, `readEnrichRows`, `writeEnrichResults`, `SearchRow`, `EnrichRow`, `EnrichResult`, `EnrichStatus` |
 | `cache.ts` | One in-memory result record, loaded from and saved to a JSON file whose path is passed per call. | `loadCache`, `getCached`, `setCached`, `saveCache`, `buildSearchCacheKey`, `buildEnrichCacheKey` |
 
 `SearchRow` is input and `SearchResult` is output; they share only `rowNumber`, the join key between
@@ -138,7 +138,7 @@ flowchart TB
         CE --> ATT{"data[0].attributes<br/>present?"}
         ATT -- no --> NODATA["no fields written<br/>notes = matchStatus or NO_DATA"]
         ATT -- yes --> FIELDS["email, jobTitle,<br/>phone, mobilePhone"]
-        NODATA --> WRITE2["cache.setCached<br/>excel.writeEnrichResults overwrites<br/>Email/Title/Phone/Mobile in place + fill"]
+        NODATA --> WRITE2["cacheUnlessCreditLimited<br/>LIMIT_EXCEEDED is never cached<br/>excel.writeEnrichResults overwrites<br/>Email/Title/Phone/Mobile in place + fill"]
         FIELDS --> WRITE2
     end
     AUTH["auth.getBearerToken<br/>client credentials, cached in memory"]
@@ -350,8 +350,9 @@ the exception: written directly with no fill, and *appended* — when the cell i
 note is joined with `' | '`, so a note left by search survives.
 
 `runEnrich` logs the post-filter row count and `Summary: <a> enriched, <b> no data, <c> errors`. The
-tally keys on `EnrichResult.status`, a four-way union (`ENRICHED` / `NO_DATA` / `LIMIT_EXCEEDED` /
-`ERROR`) set where each result is built, so rewording a note can no longer change a count. A
+tally keys on `EnrichResult.status`, typed `EnrichStatus` — a four-way union (`ENRICHED` /
+`NO_DATA` / `LIMIT_EXCEEDED` / `ERROR`) declared in `excel.ts` beside `EnrichResult` and set where
+each result is built, so rewording a note can no longer change a count. A
 `FULL_MATCH` returning none of the four fields is still `NO_DATA`. `LIMIT_EXCEEDED` is counted
 separately and, when non-zero, printed to stderr as `RUN TRUNCATED BY CREDIT LIMIT: …` — the run
 finished but the remaining contacts are unenriched. Entries cached before `status` existed are

@@ -159,11 +159,29 @@ all. Two different situations produce a note:
 | `CONTACT_ONLY_MATCH` (and similar non-`FULL_MATCH` statuses) | ZoomInfo matched the person but flagged the match as less than fully confident | Yes — fields are written, note is just informational |
 | `NO_MATCH` | ZoomInfo can no longer resolve this person ID — the record was likely merged, deduplicated, or retired since `search` ran | No — row is left as-is |
 | `OPT_OUT` | The person opted out of ZoomInfo's data collection | No — row is left as-is |
+| `LIMIT_EXCEEDED` | The ZoomInfo account ran out of credits partway through the run | No — not cached, so a re-run after topping up retries it automatically |
 | `Error during enrichment: ...` | The API request itself failed | No — not cached, so a re-run retries it automatically |
 
-None of these indicate a problem with the tool or with the person ID captured during `search` —
-ZoomInfo's underlying data simply changes over time. A handful out of a few thousand rows is
-normal churn, not something to chase down.
+Apart from `LIMIT_EXCEEDED`, none of these indicate a problem with the tool or with the person ID
+captured during `search` — ZoomInfo's underlying data simply changes over time. A handful out of a
+few thousand rows is normal churn, not something to chase down.
+
+### Running out of credits
+
+`enrich` spends a credit per contact it actually looks up, and the account has less headroom than
+the ACTIVE set needs. When credits run out mid-run, the remaining rows come back `LIMIT_EXCEEDED`
+and the run ends with a line on stderr:
+
+```
+RUN TRUNCATED BY CREDIT LIMIT: 412 of 2278 rows came back LIMIT_EXCEEDED and are not enriched.
+Top up ZoomInfo credits and re-run to finish them.
+```
+
+The run still finishes and still writes its output workbook — the enriched rows are real and the
+truncated ones are simply left as they were. `LIMIT_EXCEEDED` results are deliberately **not**
+cached, so once credits are topped up an ordinary re-run picks up exactly the rows that missed out
+and costs nothing for the ones already done. Do not pass `--fresh` to recover from this: it would
+re-spend a credit on every row, including the ones that already succeeded.
 
 ## Troubleshooting
 
@@ -174,6 +192,7 @@ normal churn, not something to chase down.
 | Write fails at the end of a run | The output file is probably open in Excel. Close it and re-run — the cache makes the re-run free |
 | `401` errors | Bad or expired credentials in `.env` |
 | `429` errors | Rate limit. The built-in throttle normally prevents this — if it appears, something else is sharing the ZoomInfo account's quota. Wait and re-run |
+| `RUN TRUNCATED BY CREDIT LIMIT` | `enrich` ran out of ZoomInfo credits partway through. Top up, then re-run the same command — see [Running out of credits](#running-out-of-credits). Don't use `--fresh` |
 | Person IDs display as `1.23457E+10` | Column W was reformatted as a number. The tool writes IDs as text; undo the formatting or re-run |
 | Results look wrong after a code change | Stale cache — delete `data/cache/search_cache.store` (or `enrich_cache.store`) and re-run |
 | `enrich` skips rows you expected it to process | Row isn't marked `ACTIVE` in column V, or `ZoomInfo Person ID` (W) is blank — both are required |
