@@ -49,7 +49,7 @@ salesforce-contact-auditor/
 │   └── cache.ts       # In-memory result store with JSON file load/save
 ├── dist/              # tsc output, gitignored. `npm start` runs dist/cli.js
 ├── data/              # GITIGNORED — real PII. input/ · output/ · cache/
-├── docs/              # This file plus exported diagram renders (Architecture_Diagram.svg / .png)
+├── docs/              # This file plus the exported diagram render (ProjectArchitecture.svg)
 ├── .env               # CLIENT_ID / CLIENT_SECRET (.env.example is committed, placeholders only)
 ├── names.csv          # Nickname → formal-name lookup. Nothing in src/ reads it
 └── README.md          # Operator guide
@@ -95,8 +95,8 @@ runtime imports:                              type-only (erased at compile time,
 
 `SearchRow` is input and `SearchResult` is output; they share only `rowNumber`, the join key between
 sheet and results. `personId` is a `string` everywhere in the codebase and becomes a `number` exactly
-once, inside `contactEnrich`. Exported renders of the flow below live at
-`docs/Architecture_Diagram.svg` / `.png`.
+once, inside `contactEnrich`. An exported render of the flow below lives at
+`docs/ProjectArchitecture.svg`.
 
 ```mermaid
 flowchart TB
