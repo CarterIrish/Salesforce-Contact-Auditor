@@ -485,9 +485,6 @@ silently promoted back into the `ACTIVE` set; a recovered row already carries it
   the run *after* every API call has been spent and after the cache has been saved.
 - **Output filenames interpolate the worksheet name only**, never the input filename, so two input
   workbooks with the same tab name overwrite each other's output.
-- **The built-in `--help` text is out of sync with the code.** It advertises three search statuses
-  (`ACTIVE` / `INACTIVE` / `NOT_FOUND`) where `search.ts` produces five, and describes enrich as
-  pulling title/email/phone where the code also pulls `mobilePhone`.
 - **Smaller edges.** The `inputPath === outputPath` guard is plain string equality, so two spellings
   of one path slip through. Duplicate header text in row 1 resolves to the last matching column.
   `names.csv` is committed for a future nickname rule but nothing in `src/` reads it.
