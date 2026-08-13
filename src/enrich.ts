@@ -24,7 +24,6 @@ export const runEnrich = async (inputFile: string, worksheetName: string, fresh?
     console.log(`Read ${excelContacts.length} contacts from ${inputFile}`);
 
     const allResults: EnrichResult[] = await Promise.all(excelContacts.map(contact => processEnrichContact(contact, fresh)));
-    cache.saveCache(ENRICH_CACHE_FILE_PATH);
 
     const tally: Record<EnrichStatus, number> = { ENRICHED: 0, NO_DATA: 0, LIMIT_EXCEEDED: 0, ERROR: 0 };
     for (const result of allResults) {
@@ -34,7 +33,14 @@ export const runEnrich = async (inputFile: string, worksheetName: string, fresh?
     if (tally.LIMIT_EXCEEDED > 0) {
         console.error(`RUN TRUNCATED BY CREDIT LIMIT: ${tally.LIMIT_EXCEEDED} of ${allResults.length} rows came back LIMIT_EXCEEDED and are not enriched. Top up ZoomInfo credits and re-run to finish them.`);
     }
-    await writeEnrichResults(inputFile, `data/output/enriched_${worksheetName}.xlsx`, allResults, worksheetName);
+
+    // The store and the workbook are the only two copies of what the credits bought. Attempt both
+    // even if the first fails, so one unwritable target cannot discard the whole run.
+    try {
+        cache.saveCache(ENRICH_CACHE_FILE_PATH);
+    } finally {
+        await writeEnrichResults(inputFile, `data/output/enriched_${worksheetName}.xlsx`, allResults, worksheetName);
+    }
 }
 
 /**

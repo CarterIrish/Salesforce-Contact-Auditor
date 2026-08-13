@@ -23,8 +23,6 @@ export const runSearch = async (inputFile: string, worksheetName: string, fresh?
   // Process each contact and collect results
   const allResults: SearchResult[] = await Promise.all(contacts.map(contact => processContact(contact, fresh)));
 
-  cache.saveCache(SEARCH_CACHE_FILE_PATH);
-
   // Build the summary of results
   let errorCount = 0;
   let activeCount = 0;
@@ -41,8 +39,14 @@ export const runSearch = async (inputFile: string, worksheetName: string, fresh?
 
   console.log(`Summary: ${activeCount} active, ${inactiveCount} inactive, ${nameMismatchCount} name mismatch, ${notFoundCount} not found, ${errorCount} errors`);
 
-  // Per-tab output filename so runs against different tabs don't overwrite each other.
-  await writeSearchResults(inputFile, `data/output/annotated_${worksheetName}.xlsx`, allResults, worksheetName);
+  // The store and the workbook are the only two copies of a run's results. Attempt both even if the
+  // first fails, so one unwritable target cannot discard the whole run.
+  try {
+    cache.saveCache(SEARCH_CACHE_FILE_PATH);
+  } finally {
+    // Per-tab output filename so runs against different tabs don't overwrite each other.
+    await writeSearchResults(inputFile, `data/output/annotated_${worksheetName}.xlsx`, allResults, worksheetName);
+  }
 };
 
 export interface SearchResult {

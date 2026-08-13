@@ -402,8 +402,10 @@ despite the `.store` extension, with no TTL, entry cap, eviction or schema versi
 `loadCache` runs once before the fan-out, `saveCache` once after; `setCached` only mutates memory.
 `loadCache` cannot throw to its caller — a missing, corrupt or unreadable store logs and degrades to
 a cold cache. `saveCache` is the exception: it creates `data/cache/` when absent and **rethrows** any
-write failure, so a run can no longer report success having persisted nothing. `setCached` and both
-key builders are pure. `rowNumber` is re-stamped from the current row on
+write failure, so a run can no longer report success having persisted nothing. Both workflow modules
+call it inside a `try` whose `finally` writes the workbook — the store and the output file are the
+only two copies of a run's results, so one unwritable target must not skip the other. `setCached`
+and both key builders are pure. `rowNumber` is re-stamped from the current row on
 every hit (`{ ...cachedContact, rowNumber: contact.rowNumber }`): both keys are per-person, so a
 cached entry's own `rowNumber` belongs to whichever row first populated the key, and reusing it
 would misplace or blank duplicate rows on write. `--fresh` skips the cache *read*, not the write — a
@@ -493,7 +495,7 @@ silently promoted back into the `ACTIVE` set; a recovered row already carries it
   non-null object. Search reads whatever the default page returns; enrich reads only `data[0]`.
 - **Enrich's output-column check runs late.** `writeEnrichResults` calls `requireColumns` inside the
   mutate callback, so a missing `email` / `title` / `phone` / `mobile` / `tool notes` header fails
-  the run *after* every API call has been spent and after the cache has been saved.
+  the run *after* every API call has been spent. The cache is saved either way, so a re-run is free.
 - **Output filenames interpolate the worksheet name only**, never the input filename, so two input
   workbooks with the same tab name overwrite each other's output.
 - **Smaller edges.** The `inputPath === outputPath` guard is plain string equality, so two spellings
